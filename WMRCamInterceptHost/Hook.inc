@@ -1,0 +1,7 @@
+;WMRCamInterceptHost.cpp
+EXTERN HookGrabImage_RBXBackOffs:DWORD
+EXTERN HookStartCameraStream_RSPSubOffs:DWORD
+
+_OnStartCameraStream PROTO FASTCALL
+_OnStopCameraStream PROTO FASTCALL
+_OnGrabCameraImage PROTO FASTCALL
