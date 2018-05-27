@@ -1,13 +1,57 @@
 #include "stdafx.h"
-
+#include "PipeClient.h"
 #include "CamWindow.h"
 
 enum PipePackageIDs
 {
 	PipePackage_StartStream,
 	PipePackage_StreamImage,
-	PipePackage_StopStream
+	PipePackage_StopStream,
+	PipePackage_Log,
 };
+
+void SendCloseHostCommand(DWORD timeout)
+{
+	HANDLE hCloseHostPipe = CreateNamedPipe(TEXT("\\\\.\\pipe\\wmrcam_doclose"),
+		PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_WAIT, PIPE_UNLIMITED_INSTANCES, 1024, 128, 0, NULL);
+	if (hCloseHostPipe != INVALID_HANDLE_VALUE)
+	{
+		OVERLAPPED connectOverlapped = {};
+		connectOverlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+		bool connected = false;
+		if (!ConnectNamedPipe(hCloseHostPipe, &connectOverlapped))
+		{
+			switch (GetLastError())
+			{
+			case ERROR_PIPE_CONNECTED:
+				connected = true;
+				break;
+			case ERROR_IO_PENDING:
+				if (WaitForSingleObject(connectOverlapped.hEvent, timeout) == WAIT_OBJECT_0)
+				{
+					DWORD dwTransferred;
+					connected = GetOverlappedResult(hCloseHostPipe, &connectOverlapped, &dwTransferred, FALSE) != 0;
+				}
+				else
+					CancelIo(hCloseHostPipe);
+				break;
+			}
+		}
+		else
+			connected = true;
+		CloseHandle(connectOverlapped.hEvent);
+		if (connected)
+		{
+			DisconnectNamedPipe(hCloseHostPipe);
+			printf("The camera host should shut down now.\n");
+		}
+		else
+			printf("WARNING: Couldn't reach the camera host!\n");
+		CloseHandle(hCloseHostPipe);
+	}
+	else
+		printf("ERROR: Can't create the named pipe!\n");
+}
 
 void RunPipeClient()
 {
@@ -17,6 +61,7 @@ void RunPipeClient()
 	HANDLE hPipe;
 	while (true)
 	{
+		printf("Connecting to pipe server... ");
 		if (WaitNamedPipe(namedPipeName, NMPWAIT_WAIT_FOREVER))
 		{
 			hPipe = CreateFile(namedPipeName, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL); 
@@ -25,6 +70,7 @@ void RunPipeClient()
 				Sleep(10);
 				continue;
 			}
+			printf("Connected\n");
 			dataBufLen = 1024; data = (BYTE*)malloc(dataBufLen);
 			memset(data, 0, dataBufLen);
 			dataIndex = 0;
@@ -75,6 +121,16 @@ void RunPipeClient()
 									}
 									else
 										printf("Unsupported image in stream %u : %u times %ux%u.\n", (unsigned int)id, (unsigned int)count, sizeX, sizeY);
+								}
+								break;
+							case PipePackage_Log:
+								if (dataLen >= 6)
+								{
+									char *logTemp = new char[dataLen - 5 + 1];
+									memcpy(logTemp, &data[5], (dataLen - 5) * sizeof(char));
+									logTemp[dataLen - 5] = 0;
+									printf("Host log : %s", logTemp);
+									delete[] logTemp;
 								}
 								break;
 							}

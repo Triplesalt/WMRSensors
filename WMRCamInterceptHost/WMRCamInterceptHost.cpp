@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "WMRCamInterceptHost.h"
 #include "PipeServer.h"
 
 extern "C"
@@ -6,11 +7,18 @@ extern "C"
 	DWORD HookGrabImage_RBXBackOffs;
 	DWORD HookStartCameraStream_RSPSubOffs;
 }
+static void *g_pStartCameraStreamHook;
+static BYTE g_StartCameraStreamHook_Backup[12];
+static void *g_pGrabImageHook;
+static BYTE g_GrabImageHook_Backup[12];
+static void *g_pStopCameraStreamHook;
+static BYTE g_StopCameraStreamHook_Backup[12];
+static bool g_started = false;
 
 extern "C" void _OnStartCameraStream(WORD camID)
 {
 	if (camID == 0)
-		OutputDebugString(TEXT("StartCameraStream ID 0!\r\n"));
+		OnErrorLog("StartCameraStream ID 0!\r\n");
 	if (camID & 1) //ignore left camera start
 		return;
 	OnStartCameraStream(camID - 2, 2, 640, 480);
@@ -20,7 +28,7 @@ extern "C" void _OnStartCameraStream(WORD camID)
 extern "C" void _OnStopCameraStream(WORD camID)
 {
 	if (camID == 0)
-		OutputDebugString(TEXT("StopCameraStream ID 0!\r\n"));
+		OnErrorLog("StopCameraStream ID 0!\r\n");
 	if (camID & 1) //ignore left camera start
 		return;
 	OnStopCameraStream(camID - 2);
@@ -114,10 +122,28 @@ void *FindPattern(void *regionStart, size_t regionSize, const BYTE *pattern, con
 	return nullptr;
 }
 
+void GetTextSection(HMODULE hModule, void *&pTextSection, size_t &textSectionLen)
+{
+	pTextSection = nullptr;
+	textSectionLen = 0;
+
+	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
+	PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((UINT_PTR)dosHeader + dosHeader->e_lfanew);
+	IMAGE_SECTION_HEADER *sectionHeaders = (IMAGE_SECTION_HEADER*)((UINT_PTR)ntHeaders + sizeof(IMAGE_NT_HEADERS));
+	for (unsigned int i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++)
+	{
+		if (!memcmp(sectionHeaders[i].Name, ".text\0", 6))
+		{
+			pTextSection = (void*)((UINT_PTR)hModule + sectionHeaders[i].VirtualAddress);
+			textSectionLen = sectionHeaders[i].Misc.VirtualSize;
+			break;
+		}
+	}
+}
+
 void Startup()
 {
-	static bool started = false;
-	if (started) return;
+	if (g_started) return;
 	//InitializeCriticalSection(&g_imageLock);
 	HMODULE hMRUSBHost = nullptr;
 	if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, TEXT("MRUSBHost.dll"), &hMRUSBHost) && hMRUSBHost)
@@ -125,19 +151,8 @@ void Startup()
 		//TODO : Sanity checks (i.e. compare NT Headers signature with "PE\0\0", etc.)
 		void *pTextSection = nullptr;
 		size_t textSectionLen = 0;
+		GetTextSection(hMRUSBHost, pTextSection, textSectionLen);
 
-		PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hMRUSBHost;
-		PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((UINT_PTR)dosHeader + dosHeader->e_lfanew);
-		IMAGE_SECTION_HEADER *sectionHeaders = (IMAGE_SECTION_HEADER*)((UINT_PTR)ntHeaders + sizeof(IMAGE_NT_HEADERS));
-		for (unsigned int i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++)
-		{
-			if (!memcmp(sectionHeaders[i].Name, ".text\0", 6))
-			{
-				pTextSection = (void*)((UINT_PTR)hMRUSBHost + sectionHeaders[i].VirtualAddress);
-				textSectionLen = sectionHeaders[i].Misc.VirtualSize;
-				break;
-			}
-		}
 		if (pTextSection && textSectionLen)
 		{
 			//Hook grab image
@@ -156,6 +171,10 @@ void Startup()
 					VirtualProtect(pTextSection, textSectionLen, PAGE_EXECUTE_READWRITE, &oldProt);
 
 					pTempImageBuffer = (BYTE*)(*(DWORD*)(&pGrabImageCopy[3]) + (UINT_PTR)&pGrabImageCopy[7]);
+
+					memcpy(g_GrabImageHook_Backup, pGrabImageHook, 12);
+					g_pGrabImageHook = pGrabImageHook;
+
 					HookGrabImage_RBXBackOffs = pGrabImageHook[4];
 
 					pGrabImageHook[0] = 0x48;
@@ -163,6 +182,7 @@ void Startup()
 					*(unsigned long long int*)(&pGrabImageHook[2]) = (unsigned long long int)&_Hook_GrabImage;
 					pGrabImageHook[10] = 0xFF;
 					pGrabImageHook[11] = 0xD0;
+
 
 					//CameraInfo_timestampOffset = pCameraInfoCode[11];
 					//CameraInfo_IDOffset = pCameraInfoCode[19];
@@ -177,13 +197,19 @@ void Startup()
 							//verify
 							if (FindPattern(pStopCameraStream, sizeof(StopStream_Pattern), StopStream_Pattern, StopStream_Mask, sizeof(StopStream_Pattern)))
 							{
+								memcpy(g_StartCameraStreamHook_Backup, pStartCameraStream, 12);
+								g_pStartCameraStreamHook = pStartCameraStream;
+
 								HookStartCameraStream_RSPSubOffs = ((BYTE*)pStartCameraStream)[9];
 								pStartCameraStream[0] = 0x48;
 								pStartCameraStream[1] = 0xB8;
 								*(unsigned long long int*)(&pStartCameraStream[2]) = (unsigned long long int)&_Hook_StartCameraStream;
 								pStartCameraStream[10] = 0xFF;
 								pStartCameraStream[11] = 0xD0;
-								
+
+								memcpy(g_StopCameraStreamHook_Backup, pStopCameraStream, 12);
+								g_pStopCameraStreamHook = pStopCameraStream;
+
 								pStopCameraStream[0] = 0x48;
 								pStopCameraStream[1] = 0xB8;
 								*(unsigned long long int*)(&pStopCameraStream[2]) = (unsigned long long int)&_Hook_StopCameraStream;
@@ -191,26 +217,60 @@ void Startup()
 								pStopCameraStream[11] = 0xD0;
 							}
 							else
-								OutputDebugString(TEXT("Oasis_StopCameraStream has an unknown function body!\r\n"));
+								OnErrorLog("Oasis_StopCameraStream has an unknown function body!\r\n");
 						}
 						else
-							OutputDebugString(TEXT("Oasis_StartCameraStream has an unknown function body!\r\n"));
+							OnErrorLog("Oasis_StartCameraStream has an unknown function body!\r\n");
 					}
 					else
-						OutputDebugString(TEXT("Can't find Oasis_StartCameraStream and/or Oasis_StopCameraStream!\r\n"));
+						OnErrorLog("Can't find Oasis_StartCameraStream and/or Oasis_StopCameraStream!\r\n");
 
 					VirtualProtect(pTextSection, textSectionLen, oldProt, &oldProt);
-					started = true;
+					g_started = true;
 				}
 				else
-					OutputDebugString(TEXT("Can't find GrabImage_Hook!\r\n"));
+					OnErrorLog("Can't find GrabImage_Hook!\r\n");
 			}
 			else
-				OutputDebugString(TEXT("Can't find GrabImage_Copy!\r\n"));
+				OnErrorLog("Can't find GrabImage_Copy!\r\n");
 		}
 		else
-			OutputDebugString(TEXT("Can't find .text section of MRUSBHost.dll!\r\n"));
+			OnErrorLog("Can't find .text section of MRUSBHost.dll!\r\n");
 	}
 	else
-		OutputDebugString(TEXT("Can't find MRUSBHost.dll!\r\n"));
+		OnErrorLog("Can't find MRUSBHost.dll!\r\n");
+}
+
+void Shutdown()
+{
+	if (!g_started)
+		return;
+	HMODULE hMRUSBHost = nullptr;
+	if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, TEXT("MRUSBHost.dll"), &hMRUSBHost) && hMRUSBHost)
+	{
+		void *pTextSection = nullptr;
+		size_t textSectionLen = 0;
+		GetTextSection(hMRUSBHost, pTextSection, textSectionLen);
+		if (pTextSection && textSectionLen)
+		{
+			DWORD oldProt = 0;
+			VirtualProtect(pTextSection, textSectionLen, PAGE_EXECUTE_READWRITE, &oldProt);
+
+			if (g_pGrabImageHook)
+			{
+				memcpy(g_pGrabImageHook, g_GrabImageHook_Backup, 12);
+			}
+			if (g_pStartCameraStreamHook)
+			{
+				memcpy(g_pStartCameraStreamHook, g_StartCameraStreamHook_Backup, 12);
+			}
+			if (g_pStopCameraStreamHook)
+			{
+				memcpy(g_pStopCameraStreamHook, g_StopCameraStreamHook_Backup, 12);
+			}
+
+			VirtualProtect(pTextSection, textSectionLen, oldProt, &oldProt);
+		}
+	}
+	g_started = false;
 }

@@ -4,55 +4,67 @@
 #include <stdio.h>
 #include <vector>
 
-HANDLE hServerClosedEvent;
-HANDLE hClosePipeEvent;
+static HANDLE g_hServerClosedEvent;
+static HANDLE g_hClosePipeEvent;
 
-HANDLE g_hNewPackageEvent;
-CRITICAL_SECTION g_packageQueueLock;
-std::vector<BYTE*> g_packages;
+static HANDLE g_hNewPackageEvent;
+static CRITICAL_SECTION g_packageQueueLock;
+static std::vector<BYTE*> g_packages;
+static std::vector<BYTE*> g_errorLog;
 
 enum PipePackageIDs
 {
 	PipePackage_StartStream,
 	PipePackage_StreamImage,
 	PipePackage_StopStream,
-	PipePackage_Keepalive,
+	PipePackage_Log,
 };
 
-bool initializedCamServer = false;
+static bool g_started = false;
 void InitializeCamServer()
 {
-	if (initializedCamServer)
+	if (g_started)
 		return;
-	initializedCamServer = true;
-	hClosePipeEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-	hServerClosedEvent = CreateEvent(NULL, TRUE, TRUE, NULL);
+	g_started = true;
+	g_hClosePipeEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+	g_hServerClosedEvent = CreateEvent(NULL, TRUE, TRUE, NULL);
 	g_hNewPackageEvent = CreateEvent(NULL, FALSE, TRUE, NULL);
 	InitializeCriticalSection(&g_packageQueueLock);
 }
 
 void CloseCamServer()
 {
-	if (!initializedCamServer)
+	if (!g_started)
 		return;
-	initializedCamServer = false;
-	SetEvent(hClosePipeEvent);
-	WaitForSingleObject(hServerClosedEvent, INFINITE);
-	CloseHandle(hServerClosedEvent);
-	CloseHandle(hClosePipeEvent);
+	g_started = false;
+	SetEvent(g_hClosePipeEvent);
+	WaitForSingleObject(g_hServerClosedEvent, INFINITE);
+
+	EnterCriticalSection(&g_packageQueueLock);
+	for (int i = 0; i < g_packages.size(); i++)
+		delete[] g_packages[i];
+	g_packages.clear();
+	for (int i = 0; i < g_errorLog.size(); i++)
+		delete[] g_errorLog[i];
+	g_errorLog.clear();
+	LeaveCriticalSection(&g_packageQueueLock);
+
+	CloseHandle(g_hServerClosedEvent);
+	CloseHandle(g_hClosePipeEvent);
 	CloseHandle(g_hNewPackageEvent);
 	DeleteCriticalSection(&g_packageQueueLock);
 }
 
-struct ConnectThreadData
+class ConnectThreadData
 {
-	HANDLE hPipe;
-	CRITICAL_SECTION *syncPipeList;
-	CRITICAL_SECTION *syncClientList;
-	HANDLE *connectedBuffer;
-	int connectedCount;
-	HANDLE hPipeConnectedEvent;
-	HANDLE hDoNotAcceptConnection;
+public:
+	HANDLE hPipe = INVALID_HANDLE_VALUE;
+	CRITICAL_SECTION *syncPipeList = nullptr;
+	CRITICAL_SECTION *syncClientList = nullptr;
+	std::vector<HANDLE> connectedBuffer;
+	size_t connectedCount = 0;
+	HANDLE hPipeConnectedEvent = NULL;
+	HANDLE hDoNotAcceptConnection = NULL;
 };
 DWORD __stdcall ConnectThread(ConnectThreadData *d)
 {
@@ -65,17 +77,34 @@ DWORD __stdcall ConnectThread(ConnectThreadData *d)
 		{
 			if (WaitForSingleObject(d->hDoNotAcceptConnection, 0) == WAIT_TIMEOUT)
 			{
-				HANDLE *newConnectedPipeBuffer = new HANDLE[d->connectedCount+1];
-				memcpy(newConnectedPipeBuffer, d->connectedBuffer, sizeof(HANDLE) * d->connectedCount);
-				newConnectedPipeBuffer[d->connectedCount] = d->hPipe;
-				delete[] d->connectedBuffer;
-				d->connectedBuffer = newConnectedPipeBuffer;
-				d->connectedCount++;
+				d->connectedBuffer.push_back(d->hPipe);
 
+				LeaveCriticalSection(d->syncClientList);
+
+				std::vector<BYTE*> errorLogLocal;
+				EnterCriticalSection(&g_packageQueueLock);
+				errorLogLocal.swap(g_errorLog);
+				LeaveCriticalSection(&g_packageQueueLock);
+
+				for (size_t i = 0; i < errorLogLocal.size(); i++)
+				{
+					DWORD numBytesWritten = 0;
+					WriteFile(d->hPipe, errorLogLocal[i], *(DWORD*)&(errorLogLocal[i][0]), &numBytesWritten, NULL);
+				}
+
+				EnterCriticalSection(&g_packageQueueLock);
+				errorLogLocal.swap(g_errorLog);
+				LeaveCriticalSection(&g_packageQueueLock);
+
+				EnterCriticalSection(d->syncClientList);
+
+				d->connectedCount++;
 				SetEvent(d->hPipeConnectedEvent);
 			}
 			else
+			{
 				CloseHandle(d->hPipe);
+			}
 			LeaveCriticalSection(d->syncClientList);
 			break;
 		}
@@ -206,34 +235,43 @@ void OnStopCameraStream(WORD id)
 	LeaveCriticalSection(&g_packageQueueLock);
 }
 
-static void OnRequestKeepalive()
+void OnErrorLog(const char *error)
 {
-	BYTE *stopPackage = new BYTE[7];
-	*(DWORD*)(&stopPackage[0]) = 5;
-	stopPackage[4] = PipePackage_Keepalive;
+	size_t errorLen = strlen(error);
+	DWORD pkLen = (5 + errorLen * sizeof(char)) & (DWORD)~0;
+
+	BYTE *errPackage = new BYTE[pkLen];
+	*(DWORD*)(&errPackage[0]) = pkLen;
+	errPackage[4] = PipePackage_Log;
+	memcpy(&errPackage[5], error, pkLen);
+
+	if (!g_started) //allow initialization error logs
+	{
+		g_errorLog.push_back(errPackage);
+		return;
+	}
+
+	//create a copy for g_errorLog since delete[] will be called on errPackage sooner or later
+	BYTE *errPackageCopy = new BYTE[pkLen];
+	memcpy(errPackageCopy, errPackage, pkLen);
 
 	EnterCriticalSection(&g_packageQueueLock);
-	for (size_t i = 0; i < g_packages.size(); i++)
-	{
-		if (g_packages[i][4] == PipePackage_Keepalive)
-		{
-			delete[] g_packages[i];
-			g_packages.erase(g_packages.begin() + i);
-			i--;
-		}
-	}
-	g_packages.push_back(stopPackage);
+	g_errorLog.push_back(errPackageCopy);
+
+	g_packages.push_back(errPackage);
 	SetEvent(g_hNewPackageEvent);
 	LeaveCriticalSection(&g_packageQueueLock);
+
+	OutputDebugStringA(error);
 }
 
 bool RunCamServer()
 {
 	InitializeCamServer();
-	if (WaitForSingleObject(hServerClosedEvent, 0) == WAIT_TIMEOUT)
+	if (WaitForSingleObject(g_hServerClosedEvent, 0) == WAIT_TIMEOUT)
 		return false;
-	ResetEvent(hServerClosedEvent);
-	ResetEvent(hClosePipeEvent);
+	ResetEvent(g_hServerClosedEvent);
+	ResetEvent(g_hClosePipeEvent);
 
 	HANDLE hDisconnectedPipe = INVALID_HANDLE_VALUE;
 	
@@ -244,15 +282,21 @@ bool RunCamServer()
 	InitializeCriticalSection(&syncClientList);
 
 	HANDLE hConnectThread = INVALID_HANDLE_VALUE;
-	ConnectThreadData tData; ZeroMemory(&tData, sizeof(ConnectThreadData));
-	tData.connectedBuffer = new HANDLE[0];
-	tData.connectedCount = 0;
-	tData.hDoNotAcceptConnection = hClosePipeEvent;
+	ConnectThreadData tData;
+	tData.hDoNotAcceptConnection = g_hClosePipeEvent;
 
-	HANDLE waitHandleList[3] = {hPipeConnectEvent, hClosePipeEvent, g_hNewPackageEvent};
+	HANDLE waitHandleList[3] = {hPipeConnectEvent, g_hClosePipeEvent, g_hNewPackageEvent};
 
 	while (true)
 	{
+		//Simple way to close the server. If the server of that pipe was on this end, arbitrary programs connecting to this pipe could cause false-positives.
+		HANDLE hCloseNotifyPipe = CreateFile(TEXT("\\\\.\\pipe\\wmrcam_doclose"), GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+		if (hCloseNotifyPipe != INVALID_HANDLE_VALUE)
+		{
+			CloseHandle(hCloseNotifyPipe);
+			break;
+		}
+
 		if (hDisconnectedPipe == INVALID_HANDLE_VALUE)
 		{
 			hDisconnectedPipe = CreateNamedPipe(TEXT("\\\\.\\pipe\\wmrcam"), 
@@ -276,7 +320,7 @@ bool RunCamServer()
 			}
 		}
 		bool doBreak = false;
-		switch (WaitForMultipleObjects(3, waitHandleList, FALSE, INFINITE))
+		switch (WaitForMultipleObjects(3, waitHandleList, FALSE, 1000))
 		{
 		case WAIT_OBJECT_0: //hPipeConnectEvent
 			hDisconnectedPipe = INVALID_HANDLE_VALUE;
@@ -286,9 +330,8 @@ bool RunCamServer()
 			break;
 		case WAIT_OBJECT_0+2: //g_hNewPackageEvent
 			break;
-		//case WAIT_TIMEOUT:
-		//	OnRequestKeepalive();
-		//	continue;
+		case WAIT_TIMEOUT:
+			continue; //allows updating the close event
 		default:
 			Sleep(10);
 			continue;
@@ -309,11 +352,16 @@ bool RunCamServer()
 			{
 				BYTE *buffer = localPackages[i];
 				DWORD bufferLen = *(DWORD*)&(localPackages[i][0]);
-				for (int k = 0; k < tData.connectedCount; k++)
+				for (size_t k = 0; k < tData.connectedCount; k++)
 				{
 					HANDLE hPipe = tData.connectedBuffer[k];
 					DWORD numBytesWritten = 0;
-					WriteFile(hPipe, buffer, bufferLen, &numBytesWritten, NULL);
+					if (!WriteFile(hPipe, buffer, bufferLen, &numBytesWritten, NULL) && GetLastError() == ERROR_NO_DATA)
+					{
+						DisconnectNamedPipe(hPipe);
+						tData.connectedBuffer.erase(tData.connectedBuffer.begin() + k);
+						tData.connectedCount--;
+					}
 				}
 				delete[] buffer;
 			}
@@ -324,7 +372,17 @@ bool RunCamServer()
 	
 	if (hConnectThread != INVALID_HANDLE_VALUE)
 	{
-		TerminateThread(hConnectThread, 1);
+		SetEvent(tData.hDoNotAcceptConnection);
+
+		//lure the connect thread out of its waiting state
+		HANDLE hTempCamHandle = CreateFile(TEXT("\\\\.\\pipe\\wmrcam"), GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+		if (hTempCamHandle != INVALID_HANDLE_VALUE)
+			CloseHandle(hTempCamHandle);
+
+		//terminate it in case it does not respond (slightly unsafe)
+		if (WaitForSingleObject(hConnectThread, 100) == WAIT_TIMEOUT)
+			TerminateThread(hConnectThread, 1);
+
 		CloseHandle(hConnectThread);
 	}
 	if (hDisconnectedPipe != INVALID_HANDLE_VALUE)
@@ -335,10 +393,10 @@ bool RunCamServer()
 		DisconnectNamedPipe(tData.connectedBuffer[i]);
 		CloseHandle(tData.connectedBuffer[i]);
 	}
-	delete[] tData.connectedBuffer;
+	tData.connectedBuffer.clear();
 	tData.connectedCount = 0;
 
-	SetEvent(hServerClosedEvent);
+	SetEvent(g_hServerClosedEvent);
 	
 	DeleteCriticalSection(&syncClientList);
 	DeleteCriticalSection(&syncPipeList);
