@@ -300,7 +300,7 @@ bool RunCamServer()
 		if (hDisconnectedPipe == INVALID_HANDLE_VALUE)
 		{
 			hDisconnectedPipe = CreateNamedPipe(TEXT("\\\\.\\pipe\\wmrcam"), 
-				PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, PIPE_UNLIMITED_INSTANCES, 1024, 128, 0, NULL);
+				PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 622592, 128, 0, NULL);
 			if (hDisconnectedPipe != INVALID_HANDLE_VALUE)
 			{
 				tData.hPipe = hDisconnectedPipe;
