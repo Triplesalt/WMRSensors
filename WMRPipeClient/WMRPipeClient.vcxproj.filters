@@ -21,7 +21,7 @@
     <ClInclude Include="targetver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="PipeClient.h">
+    <ClInclude Include="..\inc\WMRPipeClient\PipeClient.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
