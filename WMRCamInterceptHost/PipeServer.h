@@ -1,16 +1,15 @@
 #pragma once
 #include "..\inc\WMRPipeClient\PipeCommon.h"
 
+void InitializeCamServer();
 bool RunCamServer();
 void CloseCamServer();
 
-void OnStartCameraStream(WORD id, unsigned char count, unsigned short sizeX, unsigned short sizeY);
-void OnGetStreamImage(WORD id, const BYTE *buf, unsigned char count, unsigned short sizeX, unsigned short sizeY);
-inline void OnGetStreamImageDefault(WORD id, const BYTE *imageBuf)
-{
-	OnGetStreamImage(id, imageBuf, 2, 640, 480);
-}
-void OnStopCameraStream(WORD id);
+void OnStartCameraStream(DWORD id, unsigned short sizeX, unsigned short sizeY);
+void OnGetStreamImage(DWORD id, const BYTE *buf, unsigned short sizeX, unsigned short sizeY,
+	unsigned short gain, unsigned short exposureUs, unsigned short linePeriod, unsigned short exposureLinePeriods,
+	uint64_t timestamp);
+void OnStopCameraStream(DWORD id);
 void OnErrorLog(const char *error);
 void OnControllerTrackingStart(BYTE leftOrRight);
 void OnControllerTrackingStop(BYTE leftOrRight);

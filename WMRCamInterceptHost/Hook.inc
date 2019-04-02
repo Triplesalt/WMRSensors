@@ -1,7 +1,9 @@
 ;WMRCamInterceptHost.cpp
-EXTERN HookGrabImage_RBXBackOffs:DWORD
+EXTERN HookCloseCameraStream_RBPOffset:QWORD
+EXTERN HookCloseCameraStream_StackSize:DWORD
 EXTERN HookStartCameraStream_RSPSubOffs:DWORD
 
+_OnOpenCameraStream PROTO FASTCALL
+_OnCloseCameraStream PROTO FASTCALL
 _OnStartCameraStream PROTO FASTCALL
 _OnStopCameraStream PROTO FASTCALL
-_OnGrabCameraImage PROTO FASTCALL

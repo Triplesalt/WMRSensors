@@ -4,6 +4,8 @@
 
 DWORD WINAPI InterceptHostThread(PVOID arg)
 {
+	//Initialize pipe server locks and events
+	InitializeCamServer();
 	//Setup hooks
 	Startup();
 	//Start and run the pipe server

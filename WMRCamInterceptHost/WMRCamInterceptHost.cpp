@@ -4,108 +4,215 @@
 
 extern "C"
 {
-	DWORD HookGrabImage_RBXBackOffs;
+	UINT_PTR HookCloseCameraStream_RBPOffset;
+	DWORD HookCloseCameraStream_StackSize;
 	DWORD HookStartCameraStream_RSPSubOffs;
 }
+static void *g_pOpenCameraStreamHook;
+static BYTE g_OpenCameraStreamHook_Backup[13];
+static void *g_pOpenMirroredCameraStreamHook;
+static BYTE g_OpenMirroredCameraStreamHook_Backup[13];
+static void *g_pCloseCameraStreamHook;
+static BYTE g_CloseCameraStreamHook_Backup[18];
+static void *g_pCloseMirroredCameraStreamHook;
+static BYTE g_CloseMirroredCameraStreamHook_Backup[18];
 static void *g_pStartCameraStreamHook;
 static BYTE g_StartCameraStreamHook_Backup[12];
-static void *g_pGrabImageHook;
-static BYTE g_GrabImageHook_Backup[12];
 static void *g_pStopCameraStreamHook;
 static BYTE g_StopCameraStreamHook_Backup[12];
 static bool g_started = false;
 
-extern "C" void _OnStartCameraStream(WORD camID)
+struct CameraFrameInfo
 {
-	if (camID == 0)
-		OnErrorLog("StartCameraStream ID 0!\r\n");
-	if (camID & 1) //ignore left camera start
-		return;
-	OnStartCameraStream(camID - 2, 2, 640, 480);
-}
+	uint32_t unknown1; //always 0
+	uint16_t stride; //always 640
+	uint16_t unknown2; //0 for streams 1/2, 2 for streams 3/4
+	uint64_t timestamp; //Probably 100ns steps
+};
+typedef void(*CameraFrameCallback)(struct StreamClientEntry *handle, UINT_PTR lockFrameHandle, CameraFrameInfo *frameInfo, UINT_PTR userData);
 
+typedef HRESULT(*tdOasis_LockFrame)(
+	struct StreamClientEntry *handle, UINT_PTR lockFrameHandle,
+	void **pFrameDataOut, size_t *pFrameSizeOut, 
+	WORD *pGainOut, WORD *pExposureUsOut,
+	WORD *pLinePeriodOut, WORD *pExposureLinePeriodsOut);
+typedef HRESULT(*tdOasis_UnlockFrame)(struct StreamClientEntry *handle, UINT_PTR lockFrameHandle);
+typedef HRESULT(*tdOasis_OpenCameraStream)(DWORD streamType, CameraFrameCallback userCallback, UINT_PTR userData, struct StreamClientEntry **pHandleOut);
+typedef HRESULT(*tdOasis_CloseCameraStream)(struct StreamClientEntry *handle);
+typedef HRESULT(*tdOasis_StartCameraStream)(struct StreamClientEntry *handle);
+typedef HRESULT(*tdOasis_StopCameraStream)(struct StreamClientEntry *handle);
 
-extern "C" void _OnStopCameraStream(WORD camID)
+struct StreamClientHead
 {
-	if (camID == 0)
-		OnErrorLog("StopCameraStream ID 0!\r\n");
-	if (camID & 1) //ignore left camera start
-		return;
-	OnStopCameraStream(camID - 2);
-}
-
-//static DWORD CameraInfo_timestampOffset = (DWORD)-1;
-//static DWORD CameraInfo_IDOffset = (DWORD)-1;
-
-static BYTE *pTempImageBuffer;
-
-extern "C" void _OnGrabCameraImage(WORD camID, DWORD timestamp)
+	//Either a self pointer or a StreamClientEntry.
+	void *pLeftLink;
+	//Either a self pointer or a StreamClientEntry.
+	void *pRightLink;
+	//Seems to be 0 all the time (not initialized?)
+	SRWLOCK lock;
+	//For exclusive access : lock owner Thread ID; For shared access : lock count.
+	DWORD lockMarker;
+	//Possibly padding
+	DWORD unknown1;
+	//Amount of clients that are active (for cameras the amount of started streams for the current type).
+	DWORD activeClientCount;
+	//Possibly padding
+	DWORD unknown2;
+};
+struct StreamClientEntry
 {
-	/*WORD camID = 0;
-	if (metadataContainer != nullptr && CameraInfo_IDOffset != (DWORD)-1)
-		camID = *(WORD*)((UINT_PTR)metadataContainer + 6);*/
-	OnGetStreamImageDefault(camID, pTempImageBuffer);
-	
-	//two 640*480*1bpp images combined : first line belongs to the left image, second line belongs to the right image
-	/*EnterCriticalSection(&g_imageLock);
-	for (int y = 0; y < 480; y++)
+	//Either another StreamClientEntry or the StreamClientHead (located in the .data section of MRUSBHost.dll).
+	void *pLeftLink;
+	//Either another StreamClientEntry or the StreamClientHead (located in the .data section of MRUSBHost.dll).
+	void *pRightLink;
+	//Matches the camera type (1-4) passed to OpenCameraStream; Possible non-camera stream types : 
+	//0 (Oasis_OpenIMUStream), 5 (Oasis_RegisterDeviceRemoveCallback), 6 (Oasis_CrystalKeySubscribeInputReport), 7 (Oasis_CrystalKeySubscribeEvents),
+	//8 (Oasis_SubscribeBtPairingCommandEvents), 9 (Oasis_SubscribeBtDeviceStatusEvents)
+	DWORD streamType;
+	//Always set to 1, except during destruction.
+	DWORD isValidEntry;
+	//1 for OpenCameraStream, 0 for OpenMirroredCameraStream.
+	DWORD subType;
+	//For cameras, it is 0 by default and set to 1/0 by StartCameraStream and StopCameraStream, respectively.
+	DWORD isActive;
+	//Parameters vary depending on streamType. For cameras : OnFrameReceived(StreamClientEntry *handle, UINT_PTR lockFrameHandle, void *unknown, UINT_PTR userData).
+	void *userCallback;
+	//User parameter, passed to the callback.
+	UINT_PTR userData;
+};
+
+tdOasis_OpenCameraStream Oasis_OpenCameraStream;
+tdOasis_OpenCameraStream Oasis_OpenMirroredCameraStream;
+tdOasis_CloseCameraStream Oasis_CloseCameraStream;
+tdOasis_CloseCameraStream Oasis_CloseMirroredCameraStream;
+tdOasis_StartCameraStream Oasis_StartCameraStream;
+tdOasis_StopCameraStream Oasis_StopCameraStream;
+tdOasis_LockFrame Oasis_LockFrame;
+tdOasis_UnlockFrame Oasis_UnlockFrame;
+
+static StreamClientEntry *g_OwnCameraStreams[4] = {};
+static unsigned int g_ActiveCameraStreamCounts[4] = {};
+
+void OnCameraFrame(struct StreamClientEntry *handle, UINT_PTR lockFrameHandle, CameraFrameInfo *frameInfo, UINT_PTR userData)
+{
+	DWORD streamType = handle->streamType;
+	if (handle->streamType < 1 || handle->streamType > 4)
+		OnErrorLog("OnCameraFrame type out of known range!\r\n");
+	else
 	{
-		for (int img = 0; img < 2; img++)
+		void *frameData = nullptr; size_t frameSize = 0;
+		WORD gain = 0, exposureUs = 0, linePeriod = 0, exposureLinePeriods = 0;
+		if (FAILED(Oasis_LockFrame(handle, lockFrameHandle, &frameData, &frameSize, &gain, &exposureUs, &linePeriod, &exposureLinePeriods)))
+			OnErrorLog("Oasis_LockFrame failed!\r\n");
+		else
 		{
-			memcpy(&g_images[img][640*y], &images[640*(2*y+img)], 640);
+			if (frameSize != 640*480)
+				OnErrorLog("Oasis_LockFrame returned an unexpected frame size!\r\n");
+			else
+				OnGetStreamImage(handle->streamType - 1, (BYTE*)frameData, 640, 480, gain, exposureUs, linePeriod, exposureLinePeriods, frameInfo->timestamp);
+			Oasis_UnlockFrame(handle, lockFrameHandle);
 		}
 	}
-	LeaveCriticalSection(&g_imageLock);
-	g_imagesUpdated = true;*/
+}
+
+//Hook called after Oasis_OpenCameraStream.
+extern "C" void _OnOpenCameraStream(StreamClientEntry *handle)
+{
+	if (handle->streamType < 1 || handle->streamType > 4)
+		OnErrorLog("OpenCameraStream : type out of known range!\r\n");
+}
+
+//Hook called before Oasis_CloseCameraStream.
+extern "C" void _OnCloseCameraStream(StreamClientEntry *handle)
+{
+	if (handle->streamType < 1 || handle->streamType > 4)
+		OnErrorLog("CloseCameraStream type out of known range!\r\n");
+	else if (handle->isActive)
+		OnErrorLog("CloseCameraStream called on an active handle!\r\n");
+}
+
+extern "C" void _OnStartCameraStream(StreamClientEntry *handle)
+{
+	if (handle->streamType < 1 || handle->streamType > 4)
+		OnErrorLog("StartCameraStream type out of known range!\r\n");
+	else if (handle != g_OwnCameraStreams[handle->streamType - 1])
+	{
+		if (InterlockedIncrementAcquire(&g_ActiveCameraStreamCounts[handle->streamType - 1]) == 1)
+		{
+			Oasis_StartCameraStream(g_OwnCameraStreams[handle->streamType - 1]);
+			OnStartCameraStream(handle->streamType - 1, 640, 480);
+		}
+	}
+}
+
+extern "C" void _OnStopCameraStream(StreamClientEntry *handle)
+{
+	if (handle->streamType < 1 || handle->streamType > 4)
+		OnErrorLog("StopCameraStream type out of known range!\r\n");
+	else if (handle != g_OwnCameraStreams[handle->streamType - 1])
+	{
+		if (InterlockedDecrementAcquire(&g_ActiveCameraStreamCounts[handle->streamType - 1]) == 0)
+		{
+			Oasis_StopCameraStream(g_OwnCameraStreams[handle->streamType - 1]);
+			OnStopCameraStream(handle->streamType - 1);
+		}
+	}
 }
 
 //Hook.asm import
+extern "C" void _Hook_OpenCameraStream();
+extern "C" void _Hook_CloseCameraStream();
 extern "C" void _Hook_StartCameraStream();
-extern "C" void _Hook_GrabImage();
 extern "C" void _Hook_StopCameraStream();
 
 //MRUSBHost.dll
-//48 8D 05 ?? ?? ?? ?? 0F 42 F1 49 03 D6 48 69 CF 00 B0 04 00 44 8B C6 48 03 CB 48 03 C8 E8
-static const BYTE GrabImage_Copy_Pattern[] = {
-	0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x42, 0xF1, 0x49, 0x03, 0xD6, 0x48, 0x69, 0xCF, 0x00, 0xB0, 0x04, 0x00, 0x44, 0x8B, 0xC6, 0x48, 0x03, 0xCB, 0x48, 0x03, 0xC8, 0xE8
+//40 55 53 56 57 41 54 41 55 41 56 41 57
+static const BYTE OpenCameraStream_Pattern[] = {
+	0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57
 };
-static const BYTE GrabImage_Copy_Mask[] = {
-	0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+static const BYTE OpenCameraStream_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
 };
-//42 0F B7 84 31 ?? ?? ?? ?? 66 41 89 47 06 41 83 7E ?? 00 74 04 49 03 56 ?? 48 8B 5C 24 ?? 33 C0 49 89 57 08 48 83 C4 ??
-static const BYTE GrabImage_Hook_Pattern[] = {
-	0x42, 0x0F, 0xB7, 0x84, 0x31, 0x00, 0x00, 0x00, 0x00, 0x66, 0x41, 0x89, 0x47, 0x06, 0x41, 0x83, 0x7E, 0x00, 0x00, 0x74, 0x04, 0x49, 0x03, 0x56, 0x00, 0x48, 0x8B, 0x5C, 0x24, 0x00, 0x33, 0xC0, 0x49, 0x89, 0x57, 0x08, 0x48, 0x83, 0xC4, 0x00
+//40 55 53 56 57 41 54 41 55 41 56 41 57
+static const BYTE OpenMirroredCameraStream_Pattern[] = {
+	0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57
 };
-static const BYTE GrabImage_Hook_Mask[] = {
-	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00
+static const BYTE OpenMirroredCameraStream_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
+//48 89 5C 24 10 55 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ??
+static const BYTE CloseCameraStream_Pattern[] = {
+	0x48, 0x89, 0x5C, 0x24, 0x10, 0x55, 0x48, 0x8D, 0x6C, 0x24, 0x00, 0x48, 0x81, 0xEC, 0x00, 0x00, 0x00, 0x00
+};
+static const BYTE CloseCameraStream_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00
+};
+//48 89 5C 24 10 55 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ??
+static const BYTE CloseMirroredCameraStream_Pattern[] = {
+	0x48, 0x89, 0x5C, 0x24, 0x10, 0x55, 0x48, 0x8D, 0x6C, 0x24, 0x00, 0x48, 0x81, 0xEC, 0x00, 0x00, 0x00, 0x00
+};
+static const BYTE CloseMirroredCameraStream_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00
 };
 //48 89 5C 24 08 57 48 83 EC ?? 33 DB 48 8B F9 8B 49 ??
-static const BYTE StartStream_Pattern[] = {
+static const BYTE StartCameraStream_Pattern[] = {
 	0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x00, 0x33, 0xDB, 0x48, 0x8B, 0xF9, 0x8B, 0x49, 0x00
 };
-static const BYTE StartStream_Mask[] = {
+static const BYTE StartCameraStream_Mask[] = {
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00
 };
 //48 89 5C 24 10 48 89 74 24 18 55 57
-static const BYTE StopStream_Pattern[] = {
+static const BYTE StopCameraStream_Pattern[] = {
 	0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x55, 0x57
 };
-static const BYTE StopStream_Mask[] = {
+static const BYTE StopCameraStream_Mask[] = {
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
 };
-
-//4C 8B 35 ?? ?? ?? ?? B8 80 02 00 00 4C 8B 7C 24 ?? 41 83 27 00 66 41 89 47 04
-//static const BYTE GrabImage_CameraInfo_Pattern[] = {
-//	0x4C, 0x8B, 0x35, 0x00, 0x00, 0x00, 0x00, 0xB8, 0x80, 0x02, 0x00, 0x00, 0x4C, 0x8B, 0x7C, 0x24, 0x00, 0x41, 0x83, 0x27, 0x00, 0x66, 0x41, 0x89, 0x47, 0x04
-//};
-//static const BYTE GrabImage_CameraInfo_Mask[] = {
-//	0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
-//};
 
 void *FindPattern(void *regionStart, size_t regionSize, const BYTE *pattern, const BYTE *mask, size_t patternSize)
 {
 	void *regionEnd = (void*)((UINT_PTR)regionStart + regionSize);
-	for (BYTE *curLoc = ((BYTE*)regionStart); (UINT_PTR)(curLoc + patternSize) <= (UINT_PTR)regionEnd; curLoc = &curLoc[1])
+	for (BYTE *curLoc = ((BYTE*)regionStart); (UINT_PTR)(curLoc + patternSize) <= (UINT_PTR)regionEnd; curLoc++)
 	{
 		bool found = true;
 		for (size_t i = 0; i < patternSize; i++)
@@ -122,20 +229,20 @@ void *FindPattern(void *regionStart, size_t regionSize, const BYTE *pattern, con
 	return nullptr;
 }
 
-void GetTextSection(HMODULE hModule, void *&pTextSection, size_t &textSectionLen)
+void GetImageSection(HMODULE hModule, void *&pSection, size_t &sectionLen, const char *sectionName)
 {
-	pTextSection = nullptr;
-	textSectionLen = 0;
+	pSection = nullptr;
+	sectionLen = 0;
 
 	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
 	PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((UINT_PTR)dosHeader + dosHeader->e_lfanew);
 	IMAGE_SECTION_HEADER *sectionHeaders = (IMAGE_SECTION_HEADER*)((UINT_PTR)ntHeaders + sizeof(IMAGE_NT_HEADERS));
 	for (unsigned int i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++)
 	{
-		if (!memcmp(sectionHeaders[i].Name, ".text\0", 6))
+		if (!strncmp((char*)sectionHeaders[i].Name, sectionName, 8))
 		{
-			pTextSection = (void*)((UINT_PTR)hModule + sectionHeaders[i].VirtualAddress);
-			textSectionLen = sectionHeaders[i].Misc.VirtualSize;
+			pSection = (void*)((UINT_PTR)hModule + sectionHeaders[i].VirtualAddress);
+			sectionLen = sectionHeaders[i].Misc.VirtualSize;
 			break;
 		}
 	}
@@ -144,101 +251,219 @@ void GetTextSection(HMODULE hModule, void *&pTextSection, size_t &textSectionLen
 void Startup()
 {
 	if (g_started) return;
+
+	for (size_t i = 0; i < 4; i++)
+	{
+		g_OwnCameraStreams[i] = nullptr;
+		g_ActiveCameraStreamCounts[i] = 0;
+	}
+
 	//InitializeCriticalSection(&g_imageLock);
 	HMODULE hMRUSBHost = nullptr;
-	if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, TEXT("MRUSBHost.dll"), &hMRUSBHost) && hMRUSBHost)
+	if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, TEXT("MRUSBHost.dll"), &hMRUSBHost) || !hMRUSBHost)
 	{
-		//TODO : Sanity checks (i.e. compare NT Headers signature with "PE\0\0", etc.)
-		void *pTextSection = nullptr;
-		size_t textSectionLen = 0;
-		GetTextSection(hMRUSBHost, pTextSection, textSectionLen);
+		OnErrorLog("Can't find MRUSBHost.dll!\r\n");
+		return;
+	}
+	void *pTextSection = nullptr;
+	size_t textSectionLen = 0;
+	GetImageSection(hMRUSBHost, pTextSection, textSectionLen, ".text");
+	if (!pTextSection || textSectionLen == 0)
+	{
+		OnErrorLog("Can't find the .text section of MRUSBHost.dll!\r\n");
+		return;
+	}
 
-		if (pTextSection && textSectionLen)
+	void *pDataSection = nullptr;
+	size_t dataSectionLen = 0;
+	GetImageSection(hMRUSBHost, pDataSection, dataSectionLen, ".data");
+	if (!pDataSection || dataSectionLen == 0)
+	{
+		OnErrorLog("Can't find the .data section of MRUSBHost.dll!\r\n");
+		return;
+	}
+
+	DWORD oldProt = 0;
+	VirtualProtect(pTextSection, textSectionLen, PAGE_EXECUTE_READWRITE, &oldProt);
+
+	Oasis_OpenCameraStream = (tdOasis_OpenCameraStream)GetProcAddress(hMRUSBHost, "Oasis_OpenCameraStream");
+	Oasis_OpenMirroredCameraStream = (tdOasis_OpenCameraStream)GetProcAddress(hMRUSBHost, "Oasis_OpenMirroredCameraStream");
+	Oasis_CloseCameraStream = (tdOasis_CloseCameraStream)GetProcAddress(hMRUSBHost, "Oasis_CloseCameraStream");
+	Oasis_CloseMirroredCameraStream = (tdOasis_CloseCameraStream)GetProcAddress(hMRUSBHost, "Oasis_CloseMirroredCameraStream");
+	Oasis_StartCameraStream = (tdOasis_StartCameraStream)GetProcAddress(hMRUSBHost, "Oasis_StartCameraStream");
+	Oasis_StopCameraStream = (tdOasis_StopCameraStream)GetProcAddress(hMRUSBHost, "Oasis_StopCameraStream");
+	Oasis_LockFrame = (tdOasis_LockFrame)GetProcAddress(hMRUSBHost, "Oasis_LockFrame");
+	Oasis_UnlockFrame = (tdOasis_UnlockFrame)GetProcAddress(hMRUSBHost, "Oasis_UnlockFrame");
+
+	if (!Oasis_OpenCameraStream ||
+		!FindPattern(Oasis_OpenCameraStream, sizeof(OpenCameraStream_Pattern), OpenCameraStream_Pattern, OpenCameraStream_Mask, sizeof(OpenCameraStream_Pattern)))
+	{
+		OnErrorLog("Oasis_OpenCameraStream not found or has an unknown function body!\r\n");
+		goto fail;
+	}
+	if (!Oasis_OpenMirroredCameraStream ||
+		!FindPattern(Oasis_OpenMirroredCameraStream, sizeof(OpenMirroredCameraStream_Pattern), OpenMirroredCameraStream_Pattern, OpenMirroredCameraStream_Mask, sizeof(OpenMirroredCameraStream_Pattern)))
+	{
+		OnErrorLog("Oasis_OpenMirroredCameraStream not found or has an unknown function body!\r\n");
+		goto fail;
+	}
+	if (!Oasis_CloseCameraStream ||
+		!FindPattern(Oasis_CloseCameraStream, sizeof(CloseCameraStream_Pattern), CloseCameraStream_Pattern, CloseCameraStream_Mask, sizeof(CloseCameraStream_Pattern)))
+	{
+		OnErrorLog("Oasis_CloseCameraStream not found or has an unknown function body!\r\n");
+		goto fail;
+	}
+	if (!Oasis_CloseMirroredCameraStream ||
+		!FindPattern(Oasis_CloseMirroredCameraStream, sizeof(CloseMirroredCameraStream_Pattern), CloseMirroredCameraStream_Pattern, CloseMirroredCameraStream_Mask, sizeof(CloseMirroredCameraStream_Pattern)))
+	{
+		OnErrorLog("Oasis_CloseMirroredCameraStream not found or has an unknown function body!\r\n");
+		goto fail;
+	}
+	if (memcmp(Oasis_CloseCameraStream, Oasis_CloseMirroredCameraStream, sizeof(CloseCameraStream_Pattern)))
+	{
+		OnErrorLog("Oasis_CloseCameraStream and Oasis_CloseMirroredCameraStream entry points are different!\r\n");
+		goto fail;
+	}
+	if (!Oasis_StartCameraStream ||
+		!FindPattern(Oasis_StartCameraStream, sizeof(StartCameraStream_Pattern), StartCameraStream_Pattern, StartCameraStream_Mask, sizeof(StartCameraStream_Pattern)))
+	{
+		OnErrorLog("Oasis_StartCameraStream not found or has an unknown function body!\r\n");
+		goto fail;
+	}
+	if (!Oasis_StopCameraStream ||
+		!FindPattern(Oasis_StopCameraStream, sizeof(StopCameraStream_Pattern), StopCameraStream_Pattern, StopCameraStream_Mask, sizeof(StopCameraStream_Pattern)))
+	{
+		OnErrorLog("Oasis_StopCameraStream not found or has an unknown function body!\r\n");
+		goto fail;
+	}
+	if (!Oasis_LockFrame)
+	{
+		OnErrorLog("Oasis_LockFrame not found!\r\n");
+		goto fail;
+	}
+	if (!Oasis_UnlockFrame)
+	{
+		OnErrorLog("Oasis_LockFrame not found!\r\n");
+		goto fail;
+	}
+
+	//Hoping that no other thread calls these functions or modifies the stream client list during this operation.
+	for (size_t i = 0; i < 4; i++)
+	{
+		if (FAILED(Oasis_OpenCameraStream((DWORD)(i + 1), OnCameraFrame, (UINT_PTR)(i + 1), &g_OwnCameraStreams[i])))
 		{
-			//Hook grab image
-			BYTE *pGrabImageCopy = (BYTE*)FindPattern(pTextSection, textSectionLen, GrabImage_Copy_Pattern, GrabImage_Copy_Mask, sizeof(GrabImage_Copy_Pattern));
-			if (pGrabImageCopy)
-			{
-				//BYTE *pCameraInfoCode = (BYTE*)FindPattern(pGrabImageCopy, ((BYTE*)pTextSection + textSectionLen) - pGrabImageCopy,
-				//	GrabImage_CameraInfo_Pattern, GrabImage_CameraInfo_Mask, sizeof(GrabImage_CameraInfo_Pattern));
-				BYTE *pGrabImageHook = (BYTE*)FindPattern(pGrabImageCopy, ((BYTE*)pTextSection + textSectionLen) - pGrabImageCopy,
-					GrabImage_Hook_Pattern, GrabImage_Hook_Mask, sizeof(GrabImage_Hook_Pattern));
-
-				if (pGrabImageHook) //&& pCameraInfoCode
-				{
-					pGrabImageHook += 25;
-					DWORD oldProt = 0;
-					VirtualProtect(pTextSection, textSectionLen, PAGE_EXECUTE_READWRITE, &oldProt);
-
-					pTempImageBuffer = (BYTE*)(*(DWORD*)(&pGrabImageCopy[3]) + (UINT_PTR)&pGrabImageCopy[7]);
-
-					memcpy(g_GrabImageHook_Backup, pGrabImageHook, 12);
-					g_pGrabImageHook = pGrabImageHook;
-
-					HookGrabImage_RBXBackOffs = pGrabImageHook[4];
-
-					pGrabImageHook[0] = 0x48;
-					pGrabImageHook[1] = 0xB8;
-					*(unsigned long long int*)(&pGrabImageHook[2]) = (unsigned long long int)&_Hook_GrabImage;
-					pGrabImageHook[10] = 0xFF;
-					pGrabImageHook[11] = 0xD0;
-
-
-					//CameraInfo_timestampOffset = pCameraInfoCode[11];
-					//CameraInfo_IDOffset = pCameraInfoCode[19];
-
-					BYTE *pStartCameraStream = (BYTE*)GetProcAddress(hMRUSBHost, "Oasis_StartCameraStream");
-					BYTE *pStopCameraStream = (BYTE*)GetProcAddress(hMRUSBHost, "Oasis_StopCameraStream");
-					if (pStartCameraStream && pStopCameraStream)
-					{
-						//verify
-						if (FindPattern(pStartCameraStream, sizeof(StartStream_Pattern), StartStream_Pattern, StartStream_Mask, sizeof(StartStream_Pattern)))
-						{
-							//verify
-							if (FindPattern(pStopCameraStream, sizeof(StopStream_Pattern), StopStream_Pattern, StopStream_Mask, sizeof(StopStream_Pattern)))
-							{
-								memcpy(g_StartCameraStreamHook_Backup, pStartCameraStream, 12);
-								g_pStartCameraStreamHook = pStartCameraStream;
-
-								HookStartCameraStream_RSPSubOffs = ((BYTE*)pStartCameraStream)[9];
-								pStartCameraStream[0] = 0x48;
-								pStartCameraStream[1] = 0xB8;
-								*(unsigned long long int*)(&pStartCameraStream[2]) = (unsigned long long int)&_Hook_StartCameraStream;
-								pStartCameraStream[10] = 0xFF;
-								pStartCameraStream[11] = 0xD0;
-
-								memcpy(g_StopCameraStreamHook_Backup, pStopCameraStream, 12);
-								g_pStopCameraStreamHook = pStopCameraStream;
-
-								pStopCameraStream[0] = 0x48;
-								pStopCameraStream[1] = 0xB8;
-								*(unsigned long long int*)(&pStopCameraStream[2]) = (unsigned long long int)&_Hook_StopCameraStream;
-								pStopCameraStream[10] = 0xFF;
-								pStopCameraStream[11] = 0xD0;
-							}
-							else
-								OnErrorLog("Oasis_StopCameraStream has an unknown function body!\r\n");
-						}
-						else
-							OnErrorLog("Oasis_StartCameraStream has an unknown function body!\r\n");
-					}
-					else
-						OnErrorLog("Can't find Oasis_StartCameraStream and/or Oasis_StopCameraStream!\r\n");
-
-					VirtualProtect(pTextSection, textSectionLen, oldProt, &oldProt);
-					g_started = true;
-				}
-				else
-					OnErrorLog("Can't find GrabImage_Hook!\r\n");
-			}
-			else
-				OnErrorLog("Can't find GrabImage_Copy!\r\n");
+			OnErrorLog("Unable to open a camera stream!\r\n");
+			goto fail;
+		}
+		StreamClientEntry *pCurEntry = g_OwnCameraStreams[i];
+		while (pCurEntry->pLeftLink != g_OwnCameraStreams[i])
+		{
+			pCurEntry = (StreamClientEntry*)pCurEntry->pLeftLink;
+			if (((UINT_PTR)pCurEntry >= (UINT_PTR)pDataSection) && ((UINT_PTR)pCurEntry < ((UINT_PTR)pDataSection + dataSectionLen)))
+				continue; //pCurEntry is the StreamClientHead.
+			if (pCurEntry->isActive)
+				g_ActiveCameraStreamCounts[i]++;
+		}
+		if (g_ActiveCameraStreamCounts[i] > 0)
+		{
+			Oasis_StartCameraStream(g_OwnCameraStreams[i]);
+			OnStartCameraStream(i, 640, 480);
 		}
 		else
-			OnErrorLog("Can't find .text section of MRUSBHost.dll!\r\n");
+		{
+			Oasis_StartCameraStream(g_OwnCameraStreams[i]);
+			Oasis_StopCameraStream(g_OwnCameraStreams[i]);
+		}
 	}
-	else
-		OnErrorLog("Can't find MRUSBHost.dll!\r\n");
+
+	BYTE *pOpenCameraStream = (BYTE*)Oasis_OpenCameraStream;
+	BYTE *pOpenMirroredCameraStream = (BYTE*)Oasis_OpenMirroredCameraStream;
+	BYTE *pCloseCameraStream = (BYTE*)Oasis_CloseCameraStream;
+	BYTE *pCloseMirroredCameraStream = (BYTE*)Oasis_CloseMirroredCameraStream;
+	BYTE *pStartCameraStream = (BYTE*)Oasis_StartCameraStream;
+	BYTE *pStopCameraStream = (BYTE*)Oasis_StopCameraStream;
+
+	memcpy(g_OpenCameraStreamHook_Backup, pOpenCameraStream, 13);
+	g_pOpenCameraStreamHook = pOpenCameraStream;
+
+	pOpenCameraStream[0] = 0x48;
+	pOpenCameraStream[1] = 0xB8;
+	*(unsigned long long int*)(&pOpenCameraStream[2]) = (unsigned long long int)&_Hook_OpenCameraStream;
+	pOpenCameraStream[10] = 0xFF;
+	pOpenCameraStream[11] = 0xD0;
+	pOpenCameraStream[12] = 0x90;
+
+	memcpy(g_OpenMirroredCameraStreamHook_Backup, pOpenMirroredCameraStream, 13);
+	g_pOpenMirroredCameraStreamHook = pOpenMirroredCameraStream;
+
+	pOpenMirroredCameraStream[0] = 0x48;
+	pOpenMirroredCameraStream[1] = 0xB8;
+	*(unsigned long long int*)(&pOpenMirroredCameraStream[2]) = (unsigned long long int)&_Hook_OpenCameraStream;
+	pOpenMirroredCameraStream[10] = 0xFF;
+	pOpenMirroredCameraStream[11] = 0xD0;
+	pOpenMirroredCameraStream[12] = 0x90;
+
+	HookCloseCameraStream_RBPOffset = (UINT_PTR)((INT_PTR)(char)pCloseCameraStream[10]);
+	HookCloseCameraStream_StackSize = *(unsigned int*)(&pCloseCameraStream[14]);
+
+	memcpy(g_CloseCameraStreamHook_Backup, pCloseCameraStream, 18);
+	g_pCloseCameraStreamHook = pCloseCameraStream;
+
+	pCloseCameraStream[0] = 0x48;
+	pCloseCameraStream[1] = 0xB8;
+	*(unsigned long long int*)(&pCloseCameraStream[2]) = (unsigned long long int)&_Hook_CloseCameraStream;
+	pCloseCameraStream[10] = 0xFF;
+	pCloseCameraStream[11] = 0xD0;
+	memset(&pCloseCameraStream[12], 0x90, 6);
+
+	memcpy(g_CloseMirroredCameraStreamHook_Backup, pCloseMirroredCameraStream, 18);
+	g_pCloseMirroredCameraStreamHook = pCloseMirroredCameraStream;
+
+	pCloseMirroredCameraStream[0] = 0x48;
+	pCloseMirroredCameraStream[1] = 0xB8;
+	*(unsigned long long int*)(&pCloseMirroredCameraStream[2]) = (unsigned long long int)&_Hook_CloseCameraStream;
+	pCloseMirroredCameraStream[10] = 0xFF;
+	pCloseMirroredCameraStream[11] = 0xD0;
+	memset(&pCloseMirroredCameraStream[12], 0x90, 6);
+
+	memcpy(g_StartCameraStreamHook_Backup, pStartCameraStream, 12);
+	g_pStartCameraStreamHook = pStartCameraStream;
+
+	HookStartCameraStream_RSPSubOffs = ((BYTE*)pStartCameraStream)[9];
+	pStartCameraStream[0] = 0x48;
+	pStartCameraStream[1] = 0xB8;
+	*(unsigned long long int*)(&pStartCameraStream[2]) = (unsigned long long int)&_Hook_StartCameraStream;
+	pStartCameraStream[10] = 0xFF;
+	pStartCameraStream[11] = 0xD0;
+
+	memcpy(g_StopCameraStreamHook_Backup, pStopCameraStream, 12);
+	g_pStopCameraStreamHook = pStopCameraStream;
+
+	pStopCameraStream[0] = 0x48;
+	pStopCameraStream[1] = 0xB8;
+	*(unsigned long long int*)(&pStopCameraStream[2]) = (unsigned long long int)&_Hook_StopCameraStream;
+	pStopCameraStream[10] = 0xFF;
+	pStopCameraStream[11] = 0xD0;
+
+	g_started = true;
+	fail:
+	VirtualProtect(pTextSection, textSectionLen, oldProt, &oldProt);
+	if (!g_started && Oasis_CloseCameraStream)
+	{
+		for (size_t i = 0; i < 4; i++)
+		{
+			if (g_OwnCameraStreams[i])
+			{
+				if (g_ActiveCameraStreamCounts[i] > 0)
+				{
+					Oasis_StopCameraStream(g_OwnCameraStreams[i]);
+					OnStopCameraStream(i);
+				}
+				Oasis_CloseCameraStream(g_OwnCameraStreams[i]);
+				g_OwnCameraStreams[i] = nullptr;
+			}
+		}
+	}
 }
 
 void Shutdown()
@@ -250,15 +475,27 @@ void Shutdown()
 	{
 		void *pTextSection = nullptr;
 		size_t textSectionLen = 0;
-		GetTextSection(hMRUSBHost, pTextSection, textSectionLen);
+		GetImageSection(hMRUSBHost, pTextSection, textSectionLen, ".text");
 		if (pTextSection && textSectionLen)
 		{
 			DWORD oldProt = 0;
 			VirtualProtect(pTextSection, textSectionLen, PAGE_EXECUTE_READWRITE, &oldProt);
 
-			if (g_pGrabImageHook)
+			if (g_pOpenCameraStreamHook)
 			{
-				memcpy(g_pGrabImageHook, g_GrabImageHook_Backup, 12);
+				memcpy(g_pOpenCameraStreamHook, g_OpenCameraStreamHook_Backup, 13);
+			}
+			if (g_pOpenMirroredCameraStreamHook)
+			{
+				memcpy(g_pOpenMirroredCameraStreamHook, g_OpenMirroredCameraStreamHook_Backup, 13);
+			}
+			if (g_pCloseCameraStreamHook)
+			{
+				memcpy(g_pCloseCameraStreamHook, g_CloseCameraStreamHook_Backup, 18);
+			}
+			if (g_pCloseMirroredCameraStreamHook)
+			{
+				memcpy(g_pCloseMirroredCameraStreamHook, g_CloseMirroredCameraStreamHook_Backup, 18);
 			}
 			if (g_pStartCameraStreamHook)
 			{
@@ -270,6 +507,20 @@ void Shutdown()
 			}
 
 			VirtualProtect(pTextSection, textSectionLen, oldProt, &oldProt);
+		}
+
+		if (Oasis_CloseCameraStream)
+		{
+			for (size_t i = 0; i < 4; i++)
+			{
+				if (g_OwnCameraStreams[i])
+				{
+					if (InterlockedExchangeAcquire(&g_ActiveCameraStreamCounts[i], 0) > 0)
+						Oasis_StopCameraStream(g_OwnCameraStreams[i]);
+					Oasis_CloseCameraStream(g_OwnCameraStreams[i]);
+					g_OwnCameraStreams[i] = nullptr;
+				}
+			}
 		}
 	}
 	g_started = false;

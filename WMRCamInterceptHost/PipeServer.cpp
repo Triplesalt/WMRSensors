@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <vector>
+#include <AclAPI.h>
+
+#pragma comment(lib, "advapi32.lib")
 
 #define SERVER_MAXCONTROLLERSTATEUPDATES 16
 #define SERVER_MAXCONTROLLERSTREAMDATA 16
@@ -159,20 +162,19 @@ DWORD __stdcall ConnectThread(ConnectThreadData *d)
 }
 
 //id : stream id; count : amount of images; sizeX/sizeY : size of each image;
-void OnStartCameraStream(WORD id, unsigned char count, unsigned short sizeX, unsigned short sizeY)
+void OnStartCameraStream(DWORD id, unsigned short sizeX, unsigned short sizeY)
 {
-	BYTE *openPackage = new BYTE[12];
-	*(DWORD*)(&openPackage[0]) = 12;
+	BYTE *openPackage = new BYTE[13];
+	*(DWORD*)(&openPackage[0]) = 13;
 	openPackage[4] = PipePackage_CameraStreamStart;
-	*(WORD*)(&openPackage[5]) = id;
-	openPackage[7] = count;
-	*(unsigned short*)(&openPackage[8]) = sizeX;
-	*(unsigned short*)(&openPackage[10]) = sizeY;
+	*(DWORD*)(&openPackage[5]) = id;
+	*(unsigned short*)(&openPackage[9]) = sizeX;
+	*(unsigned short*)(&openPackage[11]) = sizeY;
 	
 	EnterCriticalSection(&g_packageQueueLock);
 	for (size_t i = 0; i < g_packages.size(); i++)
 	{
-		if (g_packages[i].second == PipePackage_CameraStreamStart && *(WORD*)(&(g_packages[i].first[5])) == id)
+		if (g_packages[i].second == PipePackage_CameraStreamStart && *(DWORD*)(&(g_packages[i].first[5])) == id)
 		{
 			delete[] g_packages[i].first;
 			g_packages.erase(g_packages.begin() + i);
@@ -184,23 +186,29 @@ void OnStartCameraStream(WORD id, unsigned char count, unsigned short sizeX, uns
 	LeaveCriticalSection(&g_packageQueueLock);
 }
 
-//id : stream id; buf : image buffer (count images one after another); count : amount of images; sizeX/sizeY : size of each image;
-void OnGetStreamImage(WORD id, const BYTE *buf, unsigned char count, unsigned short sizeX, unsigned short sizeY)
+//id : stream type id; buf : image buffer; sizeX/sizeY : size of the image;
+void OnGetStreamImage(DWORD id, const BYTE *buf, unsigned short sizeX, unsigned short sizeY,
+	unsigned short gain, unsigned short exposureUs, unsigned short linePeriod, unsigned short exposureLinePeriods,
+	uint64_t timestamp)
 {
-	DWORD packageSize = 12 + (DWORD)sizeX * (DWORD)sizeY * (DWORD)count;
+	DWORD packageSize = 29 + (DWORD)sizeX * (DWORD)sizeY;
 	BYTE *imagePackage = new BYTE[packageSize];
 	*(DWORD*)(&imagePackage[0]) = packageSize;
 	imagePackage[4] = PipePackage_CameraStreamImage;
-	*(WORD*)(&imagePackage[5]) = id;
-	imagePackage[7] = count;
-	*(unsigned short*)(&imagePackage[8]) = sizeX;
-	*(unsigned short*)(&imagePackage[10]) = sizeY;
-	memcpy(&imagePackage[12], buf, (DWORD)sizeX * (DWORD)sizeY * (DWORD)count);
+	*(DWORD*)(&imagePackage[5]) = id;
+	*(unsigned short*)(&imagePackage[9]) = sizeX;
+	*(unsigned short*)(&imagePackage[11]) = sizeY;
+	*(unsigned short*)(&imagePackage[13]) = gain;
+	*(unsigned short*)(&imagePackage[15]) = exposureUs;
+	*(unsigned short*)(&imagePackage[17]) = linePeriod;
+	*(unsigned short*)(&imagePackage[19]) = exposureLinePeriods;
+	*(uint64_t*)(&imagePackage[21]) = timestamp;
+	memcpy(&imagePackage[29], buf, (DWORD)sizeX * (DWORD)sizeY);
 	
 	EnterCriticalSection(&g_packageQueueLock);
 	for (size_t i = 0; i < g_packages.size(); i++)
 	{
-		if (g_packages[i].second == PipePackage_CameraStreamImage && *(WORD*)(&(g_packages[i].first[5])) == id)
+		if (g_packages[i].second == PipePackage_CameraStreamImage && *(DWORD*)(&(g_packages[i].first[5])) == id)
 		{
 			delete[] g_packages[i].first;
 			g_packages.erase(g_packages.begin() + i);
@@ -212,17 +220,17 @@ void OnGetStreamImage(WORD id, const BYTE *buf, unsigned char count, unsigned sh
 	LeaveCriticalSection(&g_packageQueueLock);
 }
 
-void OnStopCameraStream(WORD id)
+void OnStopCameraStream(DWORD id)
 {
-	BYTE *stopPackage = new BYTE[7];
-	*(DWORD*)(&stopPackage[0]) = 7;
+	BYTE *stopPackage = new BYTE[9];
+	*(DWORD*)(&stopPackage[0]) = 9;
 	stopPackage[4] = PipePackage_CameraStreamStop;
-	*(WORD*)(&stopPackage[5]) = id;
+	*(DWORD*)(&stopPackage[5]) = id;
 	
 	EnterCriticalSection(&g_packageQueueLock);
 	for (size_t i = 0; i < g_packages.size(); i++)
 	{
-		if (g_packages[i].second == PipePackage_CameraStreamStop && *(WORD*)(&(g_packages[i].first[5])) == id)
+		if (g_packages[i].second == PipePackage_CameraStreamStop && *(DWORD*)(&(g_packages[i].first[5])) == id)
 		{
 			delete[] g_packages[i].first;
 			g_packages.erase(g_packages.begin() + i);
@@ -310,8 +318,8 @@ void OnControllerTrackingStop(BYTE leftOrRight)
 }
 void OnControllerTrackingStateUpdate(BYTE leftOrRight, DWORD oldState, const char *oldStateName, DWORD newState, const char *newStateName)
 {
-	BYTE oldStateNameLen = min(254, strlen(oldStateName));
-	BYTE newStateNameLen = min(254, strlen(newStateName));
+	BYTE oldStateNameLen = (BYTE)min(254, strlen(oldStateName));
+	BYTE newStateNameLen = (BYTE)min(254, strlen(newStateName));
 	DWORD pkLen = 16 + (oldStateNameLen+1 + newStateNameLen+1) * sizeof(char);
 
 	BYTE *updatePackage = new BYTE[pkLen]();
@@ -419,6 +427,8 @@ void OnControllerStreamData(BYTE leftOrRight, const ControllerStreamData &data)
 	LeaveCriticalSection(&g_packageQueueLock);
 }
 
+bool InitializePipeSecurityAttributes(PSID &pPipeAccessSID, PACL &pPipeAccessACL, PSECURITY_DESCRIPTOR &pPipeAccessSD, SECURITY_ATTRIBUTES &pipeAccessSA);
+
 bool RunCamServer()
 {
 	InitializeCamServer();
@@ -426,6 +436,13 @@ bool RunCamServer()
 		return false;
 	ResetEvent(g_hServerClosedEvent);
 	ResetEvent(g_hClosePipeEvent);
+
+	PSID pPipeAccessSID = NULL;
+	PACL pPipeAccessACL = NULL;
+	PSECURITY_DESCRIPTOR pPipeAccessSD = NULL;
+	SECURITY_ATTRIBUTES pipeAccessSA;
+	if (!InitializePipeSecurityAttributes(pPipeAccessSID, pPipeAccessACL, pPipeAccessSD, pipeAccessSA))
+		return false;
 
 	HANDLE hDisconnectedPipe = INVALID_HANDLE_VALUE;
 	
@@ -454,7 +471,7 @@ bool RunCamServer()
 		if (hDisconnectedPipe == INVALID_HANDLE_VALUE)
 		{
 			hDisconnectedPipe = CreateNamedPipe(TEXT("\\\\.\\pipe\\wmrcam"), 
-				PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 622592, 128, 0, NULL);
+				PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 622592, 128, 0, &pipeAccessSA);
 			if (hDisconnectedPipe != INVALID_HANDLE_VALUE)
 			{
 				tData.hPipe = hDisconnectedPipe;
@@ -552,6 +569,63 @@ bool RunCamServer()
 	DeleteCriticalSection(&syncClientList);
 	DeleteCriticalSection(&syncPipeList);
 	CloseHandle(hPipeConnectEvent);
+
+	if (pPipeAccessSID)
+		FreeSid(pPipeAccessSID);
+	if (pPipeAccessACL)
+		LocalFree(pPipeAccessACL);
+	if (pPipeAccessSD)
+		LocalFree(pPipeAccessSD);
 	
+	return true;
+}
+
+//Based on (include trailing --) https://docs.microsoft.com/en-us/windows/desktop/SecAuthZ/creating-a-security-descriptor-for-a-new-object-in-c--
+bool InitializePipeSecurityAttributes(PSID &pPipeAccessSID, PACL &pPipeAccessACL, PSECURITY_DESCRIPTOR &pPipeAccessSD, SECURITY_ATTRIBUTES &pipeAccessSA)
+{
+	SID_IDENTIFIER_AUTHORITY authority = SECURITY_WORLD_SID_AUTHORITY;
+	if (!AllocateAndInitializeSid(&authority, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &pPipeAccessSID))
+	{
+		OutputDebugString(TEXT("AllocateAndInitializeSid failed!\r\n"));
+		return false;
+	}
+	EXPLICIT_ACCESS access = {};
+	access.grfAccessPermissions = GENERIC_READ | GENERIC_WRITE;
+	access.grfAccessMode = SET_ACCESS;
+	access.grfInheritance = NO_INHERITANCE;
+	access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+	access.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+	access.Trustee.ptstrName = (LPTSTR)pPipeAccessSID;
+
+	if (SetEntriesInAcl(1, &access, NULL, &pPipeAccessACL) != ERROR_SUCCESS)
+	{
+		OutputDebugString(TEXT("SetEntriesInAcl failed!\r\n"));
+		FreeSid(pPipeAccessSID);
+		pPipeAccessSID = NULL;
+		return false;
+	}
+
+	pPipeAccessSD = (PSECURITY_DESCRIPTOR)LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH);
+	if (!pPipeAccessSD)
+	{
+		OutputDebugString(TEXT("LocalAlloc failed!\r\n"));
+		LocalFree(pPipeAccessACL);
+		FreeSid(pPipeAccessSID);
+		pPipeAccessSID = NULL;
+		return false;
+	}
+	if (!InitializeSecurityDescriptor(pPipeAccessSD, SECURITY_DESCRIPTOR_REVISION) ||
+		!SetSecurityDescriptorDacl(pPipeAccessSD, TRUE, pPipeAccessACL, FALSE))
+	{
+		OutputDebugString(TEXT("InitializeSecurityDescriptor failed!\r\n"));
+		LocalFree(pPipeAccessSD);
+		LocalFree(pPipeAccessACL);
+		FreeSid(pPipeAccessSID);
+		pPipeAccessSID = NULL;
+		return false;
+	}
+	pipeAccessSA.nLength = sizeof(SECURITY_ATTRIBUTES);
+	pipeAccessSA.lpSecurityDescriptor = pPipeAccessSD;
+	pipeAccessSA.bInheritHandle = FALSE;
 	return true;
 }

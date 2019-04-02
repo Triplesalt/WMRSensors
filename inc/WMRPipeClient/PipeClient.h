@@ -33,29 +33,28 @@ class IWMRCameraListener
 {
 public:
 	/* Called whenever a stream starts. May not be called if this listener is added to the pipe client after the client has started.
-	id : ID of the stream.
+	id : ID of the stream (0 : Primary stream left, 1 : Primary stream right, 2 : Secondary stream left, 3 : Secondary stream right).
+	     The primary stream is used for head tracking, the secondary stream is used for controller tracking (same camera but different gain properties).
 	count : Amount of independent images (2 for stereo vision).
 	sizeX : Expected x-size of each image (pixels per line).
 	sizeY : Expected y-size of each image (amount of lines).
 	*/
-	virtual void OnStartStream(unsigned int id, unsigned int count, unsigned int sizeX, unsigned int sizeY) = 0;
+	virtual void OnStartStream(unsigned int id, unsigned int sizeX, unsigned int sizeY) = 0;
 	/* Called whenever a stream stops. May not be called if this listener is added to the pipe client after the client has started.
 	id : ID of the stream.
-	count : Amount of independent images (2 for stereo vision).
-	sizeX : Expected x-size of each image (pixels per line).
-	sizeY : Expected y-size of each image (amount of lines).
 	*/
 	virtual void OnStopStream(unsigned int id) = 0;
 
-	/* Called whenever the pipe client has received new images.
+	/* Called whenever the pipe client has received an image.
 	id : ID of the stream.
-	count : Amount of independent images (2 for stereo vision).
 	sizeX : Expected x-size of each image (pixels per line).
 	sizeY : Expected y-size of each image (amount of lines).
-	buffer : Buffer containing the grayscale images (8bpp). The first image starts at index 0, the second image at index sizeX*sizeY.
-	         Must not be used after returning from the callback.
+	buffer : Buffer containing the grayscale image (8bpp). Must not be used after returning from the callback.
+	gain, exposureUs, linePeriod, exposureLinePeriods : Additional image metadata.
 	*/
-	virtual void OnImages(unsigned int id, unsigned int count, unsigned int sizeX, unsigned int sizeY, const uint8_t *buffer) = 0;
+	virtual void OnImage(unsigned int id, unsigned int sizeX, unsigned int sizeY, const uint8_t *buffer,
+		unsigned short gain, unsigned short exposureUs, unsigned short linePeriod, unsigned short exposureLinePeriods,
+		uint64_t timestamp) = 0;
 };
 
 class IWMRLogListener
@@ -72,6 +71,7 @@ public:
 	virtual void OnClientLog(const char *line) = 0;
 };
 
+//Not implemented yet
 class IWMRControllerListener
 {
 public:

@@ -24,35 +24,38 @@ void WMRInterceptPipeClient::HandleHostMessage(unsigned char *data, size_t len)
 		switch (data[4])
 		{
 		case PipePackage_CameraStreamStart:
-			if (len >= 12)
+			if (len >= 13)
 			{
-				WORD id = *(WORD*)(&data[5]);
-				unsigned char count = data[7];
-				unsigned int sizeX = *(unsigned short*)(&data[8]);
-				unsigned int sizeY = *(unsigned short*)(&data[10]);
+				DWORD id = *(DWORD*)(&data[5]);
+				unsigned int sizeX = *(unsigned short*)(&data[9]);
+				unsigned int sizeY = *(unsigned short*)(&data[11]);
 				for (size_t i = 0; i < cameraListeners.size(); i++)
-					cameraListeners[i]->OnStartStream(id, count, sizeX, sizeY);
+					cameraListeners[i]->OnStartStream(id, sizeX, sizeY);
 			}
 			break;
 		case PipePackage_CameraStreamStop:
-			if (len >= 7)
+			if (len >= 9)
 			{
-				WORD id = *(WORD*)(&data[5]);
+				DWORD id = *(DWORD*)(&data[5]);
 				for (size_t i = 0; i < cameraListeners.size(); i++)
 					cameraListeners[i]->OnStopStream(id);
 			}
 			break;
 		case PipePackage_CameraStreamImage:
-			if (len >= 12)
+			if (len >= 29)
 			{
-				WORD id = *(WORD*)(&data[5]);
-				unsigned char count = data[7];
-				unsigned int sizeX = *(unsigned short*)(&data[8]);
-				unsigned int sizeY = *(unsigned short*)(&data[10]);
-				if (len >= (12 + (size_t)count * (size_t)sizeX * (size_t)sizeY))
+				DWORD id = *(DWORD*)(&data[5]);
+				unsigned int sizeX = *(unsigned short*)(&data[9]);
+				unsigned int sizeY = *(unsigned short*)(&data[11]);
+				unsigned short gain = *(unsigned short*)(&data[13]);
+				unsigned short exposureUs = *(unsigned short*)(&data[15]); 
+				unsigned short linePeriod = *(unsigned short*)(&data[17]); 
+				unsigned short exposureLinePeriods = *(unsigned short*)(&data[19]);
+				uint64_t timestamp = *(uint64_t*)(&data[21]);
+				if (len >= (29 + (size_t)sizeX * (size_t)sizeY))
 				{
 					for (size_t i = 0; i < cameraListeners.size(); i++)
-						cameraListeners[i]->OnImages(id, count, sizeX, sizeY, &data[12]);
+						cameraListeners[i]->OnImage(id, sizeX, sizeY, &data[29], gain, exposureUs, linePeriod, exposureLinePeriods, timestamp);
 				}
 			}
 			break;
@@ -136,19 +139,23 @@ void WMRInterceptPipeClient::Run()
 	LPCTSTR namedPipeName = TEXT("\\\\.\\pipe\\wmrcam");
 	ULONGLONG lastUpdateCall = 0;
 	ULONGLONG tmpTickCount;
+	BroadcastClientLog("Connecting to pipe server... ");
 	while (true)
 	{
-		BroadcastClientLog("Connecting to pipe server... ");
 		if (WaitNamedPipe(namedPipeName, NMPWAIT_WAIT_FOREVER))
 		{
 			BOOL result;
 			HANDLE hPipe = CreateFile(namedPipeName, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
 			if (hPipe == INVALID_HANDLE_VALUE)
 			{
-				char logBuffer[128];
-				sprintf_s(logBuffer, "Failed (Open error %u)\n", GetLastError());
-				BroadcastClientLog(logBuffer);
-				Sleep(10);
+				DWORD lastError = GetLastError();
+				if (lastError != ERROR_FILE_NOT_FOUND)
+				{
+					char logBuffer[128];
+					sprintf_s(logBuffer, "Failed (Open error %u)\n", lastError);
+					BroadcastClientLog(logBuffer);
+				}
+				Sleep(500);
 				continue;
 			}
 			OVERLAPPED rwOverlapped = {};
@@ -246,13 +253,18 @@ void WMRInterceptPipeClient::Run()
 			CloseHandle(hPipe);
 			for (size_t i = 0; i < clientListeners.size(); i++)
 				clientListeners[i]->OnClientDisconnected();
+			BroadcastClientLog("Connecting to pipe server... ");
 		}
 		else
 		{
-			char logBuffer[128];
-			sprintf_s(logBuffer, "Failed (Wait error %u)\n", GetLastError());
-			BroadcastClientLog(logBuffer);
-			Sleep(10);
+			DWORD lastError = GetLastError();
+			if (lastError != ERROR_FILE_NOT_FOUND)
+			{
+				char logBuffer[128];
+				sprintf_s(logBuffer, "Failed (Wait error %u)\n", lastError);
+				BroadcastClientLog(logBuffer);
+			}
+			Sleep(500);
 		}
 	}
 }
