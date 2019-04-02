@@ -13,7 +13,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{4CE9779A-B383-4337-919A-216581211783}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>WMRCamViewer</RootNamespace>
+    <RootNamespace>WMRViewer</RootNamespace>
     <WindowsTargetPlatformVersion>10.0.17763.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />

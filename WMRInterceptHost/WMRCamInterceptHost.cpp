@@ -367,7 +367,7 @@ void Startup()
 		if (g_ActiveCameraStreamCounts[i] > 0)
 		{
 			Oasis_StartCameraStream(g_OwnCameraStreams[i]);
-			OnStartCameraStream(i, 640, 480);
+			OnStartCameraStream((DWORD)i, 640, 480);
 		}
 		else
 		{
@@ -457,7 +457,7 @@ void Startup()
 				if (g_ActiveCameraStreamCounts[i] > 0)
 				{
 					Oasis_StopCameraStream(g_OwnCameraStreams[i]);
-					OnStopCameraStream(i);
+					OnStopCameraStream((DWORD)i);
 				}
 				Oasis_CloseCameraStream(g_OwnCameraStreams[i]);
 				g_OwnCameraStreams[i] = nullptr;
