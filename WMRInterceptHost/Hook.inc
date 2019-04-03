@@ -7,3 +7,12 @@ _OnOpenCameraStream PROTO FASTCALL
 _OnCloseCameraStream PROTO FASTCALL
 _OnStartCameraStream PROTO FASTCALL
 _OnStopCameraStream PROTO FASTCALL
+
+;WMRControllerInterceptHost.cpp
+EXTERN HookCrystalKeyStartIMUStream_RSPSubOffs:DWORD
+EXTERN HookCrystalKeyStopIMUStream_RSPSubOffs:DWORD
+EXTERN HookCrystalKeyStopIMUStream_CMPAddr:QWORD
+
+_OnCrystalKeyStartIMUStream PROTO FASTCALL
+_OnSuccessCrystalKeyStartIMUStream PROTO FASTCALL
+_OnPostCrystalKeyStopIMUStream PROTO FASTCALL

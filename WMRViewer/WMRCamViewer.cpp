@@ -66,6 +66,44 @@ public:
 		printf("%s", log);
 	}
 };
+class CamViewer_ControllerListener : public IWMRControllerListener
+{
+	uint64_t lastIMUPrint = 0;
+public:
+	void OnTrackingStart(uint32_t handle)
+	{
+		printf("Controller tracking start : %u\n", handle);
+	}
+	void OnTrackingStop(uint32_t handle)
+	{
+		printf("Controller tracking stop : %u\n", handle);
+	}
+	void OnTrackingStateChange(uint32_t handle, uint32_t leftOrRight, uint32_t oldState, const char *oldStateName, uint32_t newState, const char *newStateName)
+	{
+		printf("Controller tracking state : %u (%s), %s -> %s\n", handle, GetDeviceTypeString(leftOrRight), oldStateName, newStateName);
+	}
+
+	void OnStreamStart(uint32_t handle, uint32_t leftOrRight)
+	{
+		printf("Controller IMU stream start : %u (%s)\n", handle, GetDeviceTypeString(leftOrRight));
+	}
+	void OnStreamStop(uint32_t handle, uint32_t leftOrRight)
+	{
+		printf("Controller IMU stream stop : %u (%s)\n", handle, GetDeviceTypeString(leftOrRight));
+	}
+	void OnStreamData(uint32_t handle, uint32_t leftOrRight, const ControllerStreamData &data)
+	{
+		uint64_t curTime = GetTickCount64();
+		if (curTime - lastIMUPrint >= 100)
+		{
+			lastIMUPrint = curTime;
+			printf("Controller IMU stream data : %u (%s) (gyro (%7.3f|%7.3f|%7.3f), accel (%7.3f|%7.3f|%7.3f))\n",
+				handle, GetDeviceTypeString(leftOrRight),
+				data.gyroscope[0], data.gyroscope[1], data.gyroscope[2],
+				data.accelerometer[0], data.accelerometer[1], data.accelerometer[2]);
+		}
+	}
+};
 
 int _tmain(int argc, _TCHAR* argv[])
 {
@@ -84,6 +122,8 @@ int _tmain(int argc, _TCHAR* argv[])
 		client.AddCameraListener(cameraListener);
 		CamViewer_LogListener logListener;
 		client.AddLogListener(logListener);
+		CamViewer_ControllerListener controllerListener;
+		client.AddControllerListener(controllerListener);
 
 		client.Run();
 		CamWindow_Close();

@@ -135,5 +135,84 @@ _Hook_StopCameraStream PROC
 	JMP RAX
 _Hook_StopCameraStream ENDP
 
+_Hook_CrystalKeyStartIMUStream PROC
+	;RCX : controller handle
+	;RDX : callback
+	;R8 : user data
+	PUSH RCX
+	PUSH RDX
+	PUSH R8
+
+	SUB RSP, 38h
+
+	LEA RAX, [RSP+20h] ; parameter pCallback
+	MOV QWORD PTR [RAX], RDX
+	MOV RDX, RAX
+
+	LEA RAX, [RSP+28h] ; parameter pUserData
+	MOV QWORD PTR [RAX], R8
+	MOV R8, RAX
+
+	CALL _OnCrystalKeyStartIMUStream
+
+	MOV RCX, [RSP+48h]
+	MOV RDX, [RSP+20h]
+	MOV R8, [RSP+28h]
+	MOV RAX, [RSP+50h]
+
+	; Call CrystalKeyStartIMUStream
+	; Backup
+	LEA R10, [_PostCrystalKeyStartIMUStream]
+	PUSH R10 ;Address after the Hook CALL
+	MOV QWORD PTR [RSP+8h], RBX
+	MOV QWORD PTR [RSP+10h], RSI
+	PUSH RDI
+	MOV R10D, [HookCrystalKeyStartIMUStream_RSPSubOffs]
+	SUB RSP, R10
+
+	JMP RAX
+	_PostCrystalKeyStartIMUStream:
+	
+	TEST EAX, EAX
+	JS _FailCrystalKeyStartIMUStream
+
+	MOV QWORD PTR [RSP+20h], RAX
+
+	MOV RCX, [RSP+48h]
+	MOV RDX, [RSP+40h]
+	MOV R8, [RSP+38h]
+	CALL _OnSuccessCrystalKeyStartIMUStream
+
+	MOV RAX, QWORD PTR [RSP+20h]
+
+	_FailCrystalKeyStartIMUStream:
+
+	ADD RSP, 38h
+	POP R8
+	POP RDX
+	POP RCX
+	POP R10
+	RET
+_Hook_CrystalKeyStartIMUStream ENDP
+
+_Hook_CrystalKeyStopIMUStream PROC
+	;RCX : controller handle
+	PUSH RCX
+	SUB RSP, 28h
+	CALL _OnPostCrystalKeyStopIMUStream
+	ADD RSP, 28h
+	POP RCX
+
+	POP RAX ;Return IP
+	;Backup
+	MOV QWORD PTR [RSP+8h], RBX
+	PUSH RDI
+	MOV R10D, DWORD PTR [HookCrystalKeyStopIMUStream_RSPSubOffs]
+	SUB RSP, R10
+	MOV R10, QWORD PTR [HookCrystalKeyStopIMUStream_CMPAddr]
+	CMP DWORD PTR [R10], 0
+	JMP RAX
+_Hook_CrystalKeyStopIMUStream ENDP
+
 _text ENDS
 END

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <vector>
+#include <functional>
 #include <AclAPI.h>
 
 #pragma comment(lib, "advapi32.lib")
@@ -16,7 +17,7 @@ static HANDLE g_hClosePipeEvent;
 static HANDLE g_hNewPackageEvent;
 static CRITICAL_SECTION g_packageQueueLock;
 static std::vector<std::pair<BYTE*,PipePackageID>> g_packages;
-static std::vector<BYTE*> g_errorLog;
+static std::vector<std::pair<BYTE*, PipePackageID>> g_startLog;
 
 static bool g_started = false;
 void InitializeCamServer()
@@ -42,9 +43,9 @@ void CloseCamServer()
 	for (int i = 0; i < g_packages.size(); i++)
 		delete[] g_packages[i].first;
 	g_packages.clear();
-	for (int i = 0; i < g_errorLog.size(); i++)
-		delete[] g_errorLog[i];
-	g_errorLog.clear();
+	for (int i = 0; i < g_startLog.size(); i++)
+		delete[] g_startLog[i].first;
+	g_startLog.clear();
 	LeaveCriticalSection(&g_packageQueueLock);
 
 	CloseHandle(g_hServerClosedEvent);
@@ -122,20 +123,21 @@ DWORD __stdcall ConnectThread(ConnectThreadData *d)
 				d->connectedList.push_back({ d->hPipe, pipeFlags });
 
 				LeaveCriticalSection(d->syncClientList);
-
-				std::vector<BYTE*> errorLogLocal;
+				
+				std::vector<std::pair<BYTE*, PipePackageID>> startLogLocal;
 				EnterCriticalSection(&g_packageQueueLock);
-				errorLogLocal.swap(g_errorLog);
+				startLogLocal.swap(g_startLog);
 				LeaveCriticalSection(&g_packageQueueLock);
 
-				for (size_t i = 0; i < errorLogLocal.size(); i++)
+				for (size_t i = 0; i < startLogLocal.size(); i++)
 				{
 					DWORD numBytesWritten = 0;
-					WriteFile(d->hPipe, errorLogLocal[i], *(DWORD*)&(errorLogLocal[i][0]), &numBytesWritten, NULL);
+					WriteFile(d->hPipe, startLogLocal[i].first, *(DWORD*)&(startLogLocal[i].first[0]), &numBytesWritten, NULL);
 				}
 
 				EnterCriticalSection(&g_packageQueueLock);
-				errorLogLocal.swap(g_errorLog);
+				startLogLocal.swap(g_startLog);
+				g_startLog.insert(g_startLog.end(), startLogLocal.begin(), startLogLocal.end());
 				LeaveCriticalSection(&g_packageQueueLock);
 
 				EnterCriticalSection(d->syncClientList);
@@ -161,6 +163,45 @@ DWORD __stdcall ConnectThread(ConnectThreadData *d)
 	return 0;
 }
 
+static bool InsertPackageTo(std::vector<std::pair<BYTE*, PipePackageID>> &list, BYTE* package, PipePackageID packageType,
+	std::function<unsigned int(BYTE*, PipePackageID)> const& evaluateRedundancy)
+{
+	bool doInsert = true;
+	for (size_t i = 0; i < list.size(); i++)
+	{
+		unsigned int redundancyType = evaluateRedundancy(list[i].first, list[i].second);
+		if (redundancyType != 0)
+		{
+			delete[] list[i].first;
+			list.erase(list.begin() + i);
+			i--;
+		}
+		if (redundancyType == 2)
+		{
+			doInsert = false;
+		}
+	}
+	if (doInsert)
+		list.push_back({ package, packageType });
+	return doInsert;
+}
+static bool InsertPackage(
+	BYTE* package,
+	PipePackageID packageType,
+	std::function<unsigned int(BYTE*, PipePackageID)> const& evaluateRedundancy,
+	bool insertToStartLog = false)
+{
+	if (insertToStartLog)
+	{
+		DWORD len = *(DWORD*)package;
+		BYTE *packageCopy = new BYTE[len];
+		memcpy(packageCopy, package, len);
+		if (!InsertPackageTo(g_startLog, packageCopy, packageType, evaluateRedundancy))
+			delete[] packageCopy;
+	}
+	return InsertPackageTo(g_packages, package, packageType, evaluateRedundancy);
+}
+
 //id : stream id; count : amount of images; sizeX/sizeY : size of each image;
 void OnStartCameraStream(DWORD id, unsigned short sizeX, unsigned short sizeY)
 {
@@ -170,19 +211,19 @@ void OnStartCameraStream(DWORD id, unsigned short sizeX, unsigned short sizeY)
 	*(DWORD*)(&openPackage[5]) = id;
 	*(unsigned short*)(&openPackage[9]) = sizeX;
 	*(unsigned short*)(&openPackage[11]) = sizeY;
-	
-	EnterCriticalSection(&g_packageQueueLock);
-	for (size_t i = 0; i < g_packages.size(); i++)
+
+	auto redundancyLambda = [id](BYTE *otherPackage, PipePackageID otherPackageType) -> int
 	{
-		if (g_packages[i].second == PipePackage_CameraStreamStart && *(DWORD*)(&(g_packages[i].first[5])) == id)
-		{
-			delete[] g_packages[i].first;
-			g_packages.erase(g_packages.begin() + i);
-			i--;
-		}
-	}
-	g_packages.push_back({ openPackage, PipePackage_CameraStreamStart });
-	SetEvent(g_hNewPackageEvent);
+		if (otherPackageType == PipePackage_CameraStreamStart && *(DWORD*)(&otherPackage[5]) == id) return 1;
+		if (otherPackageType == PipePackage_CameraStreamStop && *(DWORD*)(&otherPackage[5]) == id) return 2;
+		return 0;
+	};
+
+	EnterCriticalSection(&g_packageQueueLock);
+	if (InsertPackage(openPackage, PipePackage_CameraStreamStart, redundancyLambda, true))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] openPackage;
 	LeaveCriticalSection(&g_packageQueueLock);
 }
 
@@ -204,19 +245,18 @@ void OnGetStreamImage(DWORD id, const BYTE *buf, unsigned short sizeX, unsigned 
 	*(unsigned short*)(&imagePackage[19]) = exposureLinePeriods;
 	*(uint64_t*)(&imagePackage[21]) = timestamp;
 	memcpy(&imagePackage[29], buf, (DWORD)sizeX * (DWORD)sizeY);
-	
-	EnterCriticalSection(&g_packageQueueLock);
-	for (size_t i = 0; i < g_packages.size(); i++)
+
+	auto redundancyLambda = [id](BYTE *otherPackage, PipePackageID otherPackageType) -> int
 	{
-		if (g_packages[i].second == PipePackage_CameraStreamImage && *(DWORD*)(&(g_packages[i].first[5])) == id)
-		{
-			delete[] g_packages[i].first;
-			g_packages.erase(g_packages.begin() + i);
-			i--;
-		}
-	}
-	g_packages.push_back({ imagePackage, PipePackage_CameraStreamImage });
-	SetEvent(g_hNewPackageEvent);
+		if (otherPackageType == PipePackage_CameraStreamImage && *(DWORD*)(&otherPackage[5]) == id) return 1;
+		return 0;
+	};
+
+	EnterCriticalSection(&g_packageQueueLock);
+	if (InsertPackage(imagePackage, PipePackage_CameraStreamImage, redundancyLambda))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] imagePackage;
 	LeaveCriticalSection(&g_packageQueueLock);
 }
 
@@ -226,19 +266,19 @@ void OnStopCameraStream(DWORD id)
 	*(DWORD*)(&stopPackage[0]) = 9;
 	stopPackage[4] = PipePackage_CameraStreamStop;
 	*(DWORD*)(&stopPackage[5]) = id;
-	
-	EnterCriticalSection(&g_packageQueueLock);
-	for (size_t i = 0; i < g_packages.size(); i++)
+
+	auto redundancyLambda = [id](BYTE *otherPackage, PipePackageID otherPackageType) -> int
 	{
-		if (g_packages[i].second == PipePackage_CameraStreamStop && *(DWORD*)(&(g_packages[i].first[5])) == id)
-		{
-			delete[] g_packages[i].first;
-			g_packages.erase(g_packages.begin() + i);
-			i--;
-		}
-	}
-	g_packages.push_back({ stopPackage, PipePackage_CameraStreamStop });
-	SetEvent(g_hNewPackageEvent);
+		if (otherPackageType == PipePackage_CameraStreamStop && *(DWORD*)(&otherPackage[5]) == id) return 1;
+		if (otherPackageType == PipePackage_CameraStreamStart && *(DWORD*)(&otherPackage[5]) == id) return 2;
+		return 0;
+	};
+
+	EnterCriticalSection(&g_packageQueueLock);
+	if (InsertPackage(stopPackage, PipePackage_CameraStreamStop, redundancyLambda, true))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] stopPackage;
 	LeaveCriticalSection(&g_packageQueueLock);
 }
 
@@ -254,7 +294,7 @@ void OnErrorLog(const char *error)
 
 	if (!g_started) //allow initialization error logs
 	{
-		g_errorLog.push_back(errPackage);
+		g_startLog.push_back({ errPackage, PipePackage_Log });
 		return;
 	}
 
@@ -263,7 +303,7 @@ void OnErrorLog(const char *error)
 	memcpy(errPackageCopy, errPackage, pkLen);
 
 	EnterCriticalSection(&g_packageQueueLock);
-	g_errorLog.push_back(errPackageCopy);
+	g_startLog.push_back({ errPackageCopy, PipePackage_Log });
 
 	g_packages.push_back({ errPackage, PipePackage_Log });
 	SetEvent(g_hNewPackageEvent);
@@ -272,158 +312,152 @@ void OnErrorLog(const char *error)
 	OutputDebugStringA(error);
 }
 
-void OnControllerTrackingStart(BYTE leftOrRight)
+void OnControllerTrackingStart(DWORD handle)
 {
-	BYTE *startPackage = new BYTE[6];
-	*(DWORD*)(&startPackage[0]) = 6;
+	BYTE *startPackage = new BYTE[9];
+	*(DWORD*)(&startPackage[0]) = 9;
 	startPackage[4] = PipePackage_ControllerTrackingStart;
-	startPackage[5] = leftOrRight;
+	*(DWORD*)(&startPackage[5]) = handle;
+
+	auto redundancyLambda = [handle](BYTE *otherPackage, PipePackageID otherPackageType) -> int
+	{
+		if (otherPackageType == PipePackage_ControllerTrackingStart && *(DWORD*)(&otherPackage[5]) == handle) return 1;
+		if (otherPackageType == PipePackage_ControllerTrackingStop && *(DWORD*)(&otherPackage[5]) == handle) return 2;
+		return 0;
+	};
 
 	EnterCriticalSection(&g_packageQueueLock);
-	for (size_t i = 0; i < g_packages.size(); i++)
-	{
-		if ((g_packages[i].second == PipePackage_ControllerTrackingStart || g_packages[i].second == PipePackage_ControllerTrackingStop) 
-			&& g_packages[i].first[5] == leftOrRight)
-		{
-			delete[] g_packages[i].first;
-			g_packages.erase(g_packages.begin() + i);
-			i--;
-		}
-	}
-	g_packages.push_back({ startPackage, PipePackage_ControllerTrackingStart });
-	SetEvent(g_hNewPackageEvent);
+	if (InsertPackage(startPackage, PipePackage_ControllerTrackingStart, redundancyLambda, true))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] startPackage;
 	LeaveCriticalSection(&g_packageQueueLock);
 }
-void OnControllerTrackingStop(BYTE leftOrRight)
+void OnControllerTrackingStop(DWORD handle)
 {
-	BYTE *stopPackage = new BYTE[6];
-	*(DWORD*)(&stopPackage[0]) = 6;
+	BYTE *stopPackage = new BYTE[9];
+	*(DWORD*)(&stopPackage[0]) = 9;
 	stopPackage[4] = PipePackage_ControllerTrackingStop;
-	stopPackage[5] = leftOrRight;
+	*(DWORD*)(&stopPackage[5]) = handle;
+
+	auto redundancyLambda = [handle](BYTE *otherPackage, PipePackageID otherPackageType) -> int
+	{
+		if (otherPackageType == PipePackage_ControllerTrackingStop && *(DWORD*)(&otherPackage[5]) == handle) return 1;
+		if (otherPackageType == PipePackage_ControllerTrackingStart && *(DWORD*)(&otherPackage[5]) == handle) return 2;
+		return 0;
+	};
 
 	EnterCriticalSection(&g_packageQueueLock);
-	for (size_t i = 0; i < g_packages.size(); i++)
-	{
-		if ((g_packages[i].second == PipePackage_ControllerTrackingStart || g_packages[i].second == PipePackage_ControllerTrackingStop)
-			&& g_packages[i].first[5] == leftOrRight)
-		{
-			delete[] g_packages[i].first;
-			g_packages.erase(g_packages.begin() + i);
-			i--;
-		}
-	}
-	g_packages.push_back({ stopPackage, PipePackage_ControllerTrackingStop });
-	SetEvent(g_hNewPackageEvent);
+	if (InsertPackage(stopPackage, PipePackage_ControllerTrackingStop, redundancyLambda, true))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] stopPackage;
 	LeaveCriticalSection(&g_packageQueueLock);
 }
-void OnControllerTrackingStateUpdate(BYTE leftOrRight, DWORD oldState, const char *oldStateName, DWORD newState, const char *newStateName)
+void OnControllerTrackingStateUpdate(DWORD handle, BYTE leftOrRight, DWORD oldState, const char *oldStateName, DWORD newState, const char *newStateName)
 {
 	BYTE oldStateNameLen = (BYTE)min(254, strlen(oldStateName));
 	BYTE newStateNameLen = (BYTE)min(254, strlen(newStateName));
-	DWORD pkLen = 16 + (oldStateNameLen+1 + newStateNameLen+1) * sizeof(char);
+	DWORD pkLen = 20 + (oldStateNameLen+1 + newStateNameLen+1) * sizeof(char);
 
 	BYTE *updatePackage = new BYTE[pkLen]();
 	*(DWORD*)(&updatePackage[0]) = pkLen;
 	updatePackage[4] = PipePackage_ControllerTrackingState;
-	updatePackage[5] = leftOrRight;
-	*(DWORD*)(&updatePackage[6]) = oldState;
-	*(DWORD*)(&updatePackage[10]) = newState;
+	*(DWORD*)(&updatePackage[5]) = handle;
+	updatePackage[9] = leftOrRight;
+	*(DWORD*)(&updatePackage[10]) = oldState;
+	*(DWORD*)(&updatePackage[14]) = newState;
 
-	updatePackage[14] = oldStateNameLen+1;
-	updatePackage[15] = newStateNameLen+1;
-	memcpy(&updatePackage[16], oldStateName, oldStateNameLen * sizeof(char));
-	*(char*)(&updatePackage[16 + oldStateNameLen * sizeof(char)]) = 0;
-	memcpy(&updatePackage[16 + (oldStateNameLen+1) * sizeof(char)], newStateName, newStateNameLen * sizeof(char));
-	*(char*)(&updatePackage[16 + (oldStateNameLen+1 + newStateNameLen) * sizeof(char)]) = 0;
+	updatePackage[18] = oldStateNameLen+1;
+	updatePackage[19] = newStateNameLen+1;
+	memcpy(&updatePackage[20], oldStateName, oldStateNameLen * sizeof(char));
+	*(char*)(&updatePackage[20 + oldStateNameLen * sizeof(char)]) = 0;
+	memcpy(&updatePackage[20 + (oldStateNameLen+1) * sizeof(char)], newStateName, newStateNameLen * sizeof(char));
+	*(char*)(&updatePackage[20 + (oldStateNameLen+1 + newStateNameLen) * sizeof(char)]) = 0;
 
-	EnterCriticalSection(&g_packageQueueLock);
 	size_t updateCount = 0;
-	for (size_t _i = g_packages.size(); _i > 0; _i--)
+	auto redundancyLambda = [handle,&updateCount](BYTE *otherPackage, PipePackageID otherPackageType) -> int
 	{
-		size_t i = _i - 1;
-		if (g_packages[i].second == PipePackage_ControllerTrackingState && g_packages[i].first[5] == leftOrRight)
-		{
-			if (++updateCount >= SERVER_MAXCONTROLLERSTATEUPDATES)
-			{
-				delete[] g_packages[i].first;
-				g_packages.erase(g_packages.begin() + i);
-			}
-		}
-	}
-	g_packages.push_back({ updatePackage, PipePackage_ControllerTrackingState });
-	SetEvent(g_hNewPackageEvent);
+		if (otherPackageType == PipePackage_ControllerTrackingState && *(DWORD*)(&otherPackage[5]) == handle &&
+			++updateCount >= SERVER_MAXCONTROLLERSTATEUPDATES) return 1;
+		return 0;
+	};
+
+	EnterCriticalSection(&g_packageQueueLock);
+	if (InsertPackage(updatePackage, PipePackage_ControllerTrackingState, redundancyLambda))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] updatePackage;
 	LeaveCriticalSection(&g_packageQueueLock);
 }
 
-void OnControllerStreamStart(BYTE leftOrRight)
+void OnControllerStreamStart(DWORD handle, BYTE leftOrRight)
 {
-	BYTE *startPackage = new BYTE[6];
-	*(DWORD*)(&startPackage[0]) = 6;
+	BYTE *startPackage = new BYTE[10];
+	*(DWORD*)(&startPackage[0]) = 10;
 	startPackage[4] = PipePackage_ControllerStreamStart;
-	startPackage[5] = leftOrRight;
+	*(DWORD*)(&startPackage[5]) = handle;
+	startPackage[9] = leftOrRight;
+
+	auto redundancyLambda = [handle](BYTE *otherPackage, PipePackageID otherPackageType) -> int
+	{
+		if (otherPackageType == PipePackage_ControllerStreamStart && *(DWORD*)(&otherPackage[5]) == handle) return 1;
+		if (otherPackageType == PipePackage_ControllerStreamStop && *(DWORD*)(&otherPackage[5]) == handle) return 2;
+		return 0;
+	};
 
 	EnterCriticalSection(&g_packageQueueLock);
-	for (size_t i = 0; i < g_packages.size(); i++)
-	{
-		if ((g_packages[i].second == PipePackage_ControllerStreamStart || g_packages[i].second == PipePackage_ControllerStreamStop)
-			&& g_packages[i].first[5] == leftOrRight)
-		{
-			delete[] g_packages[i].first;
-			g_packages.erase(g_packages.begin() + i);
-			i--;
-		}
-	}
-	g_packages.push_back({ startPackage, PipePackage_ControllerStreamStart });
-	SetEvent(g_hNewPackageEvent);
+	if (InsertPackage(startPackage, PipePackage_ControllerStreamStart, redundancyLambda, true))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] startPackage;
 	LeaveCriticalSection(&g_packageQueueLock);
 }
-void OnControllerStreamStop(BYTE leftOrRight)
+void OnControllerStreamStop(DWORD handle, BYTE leftOrRight)
 {
-	BYTE *stopPackage = new BYTE[6];
-	*(DWORD*)(&stopPackage[0]) = 6;
+	BYTE *stopPackage = new BYTE[10];
+	*(DWORD*)(&stopPackage[0]) = 10;
 	stopPackage[4] = PipePackage_ControllerStreamStop;
-	stopPackage[5] = leftOrRight;
+	*(DWORD*)(&stopPackage[5]) = handle;
+	stopPackage[9] = leftOrRight;
+
+	auto redundancyLambda = [handle](BYTE *otherPackage, PipePackageID otherPackageType) -> int
+	{
+		if (otherPackageType == PipePackage_ControllerStreamStop && *(DWORD*)(&otherPackage[5]) == handle) return 1;
+		if (otherPackageType == PipePackage_ControllerStreamStart && *(DWORD*)(&otherPackage[5]) == handle) return 2;
+		return 0;
+	};
 
 	EnterCriticalSection(&g_packageQueueLock);
-	for (size_t i = 0; i < g_packages.size(); i++)
-	{
-		if ((g_packages[i].second == PipePackage_ControllerStreamStart || g_packages[i].second == PipePackage_ControllerStreamStop)
-			&& g_packages[i].first[5] == leftOrRight)
-		{
-			delete[] g_packages[i].first;
-			g_packages.erase(g_packages.begin() + i);
-			i--;
-		}
-	}
-	g_packages.push_back({ stopPackage, PipePackage_ControllerStreamStop });
-	SetEvent(g_hNewPackageEvent);
+	if (InsertPackage(stopPackage, PipePackage_ControllerStreamStop, redundancyLambda, true))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] stopPackage;
 	LeaveCriticalSection(&g_packageQueueLock);
 }
-void OnControllerStreamData(BYTE leftOrRight, const ControllerStreamData &data)
+void OnControllerStreamData(DWORD handle, BYTE leftOrRight, const ControllerStreamData &data)
 {
-	DWORD pkLen = 6 + sizeof(ControllerStreamData);
+	DWORD pkLen = 10 + sizeof(ControllerStreamData);
 	BYTE *dataPackage = new BYTE[pkLen]();
 	*(DWORD*)(&dataPackage[0]) = pkLen;
 	dataPackage[4] = PipePackage_ControllerStreamData;
-	dataPackage[5] = leftOrRight;
-	*(ControllerStreamData*)(&dataPackage[6]) = data;
+	*(DWORD*)(&dataPackage[5]) = handle;
+	dataPackage[9] = leftOrRight;
+	*(ControllerStreamData*)(&dataPackage[10]) = data;
+
+	size_t updateCount = 0;
+	auto redundancyLambda = [handle, &updateCount](BYTE *otherPackage, PipePackageID otherPackageType) -> int
+	{
+		if (otherPackageType == PipePackage_ControllerStreamData && *(DWORD*)(&otherPackage[5]) == handle &&
+			++updateCount >= SERVER_MAXCONTROLLERSTREAMDATA) return 1;
+		return 0;
+	};
 
 	EnterCriticalSection(&g_packageQueueLock);
-	size_t updateCount = 0;
-	for (size_t _i = g_packages.size(); _i > 0; _i--)
-	{
-		size_t i = _i - 1;
-		if (g_packages[i].second == PipePackage_ControllerStreamData && g_packages[i].first[5] == leftOrRight)
-		{
-			if (++updateCount >= SERVER_MAXCONTROLLERSTREAMDATA)
-			{
-				delete[] g_packages[i].first;
-				g_packages.erase(g_packages.begin() + i);
-			}
-		}
-	}
-	g_packages.push_back({ dataPackage, PipePackage_ControllerStreamData });
-	SetEvent(g_hNewPackageEvent);
+	if (InsertPackage(dataPackage, PipePackage_ControllerStreamData, redundancyLambda))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] dataPackage;
 	LeaveCriticalSection(&g_packageQueueLock);
 }
 

@@ -150,10 +150,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\inc\WMRPipeClient\PipeCommon.h" />
+    <ClInclude Include="HookCommon.h" />
     <ClInclude Include="PipeServer.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="targetver.h" />
     <ClInclude Include="WMRCamInterceptHost.h" />
+    <ClInclude Include="WMRControllerInterceptHost.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -170,6 +172,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="HookCommon.cpp" />
     <ClCompile Include="PipeServer.cpp" />
     <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
@@ -178,6 +181,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="WMRCamInterceptHost.cpp" />
+    <ClCompile Include="WMRControllerInterceptHost.cpp" />
   </ItemGroup>
   <ItemGroup>
     <MASM Include="Hook.asm" />

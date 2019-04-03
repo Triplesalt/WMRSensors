@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "WMRCamInterceptHost.h"
+#include "WMRControllerInterceptHost.h"
 #include "PipeServer.h"
 
 DWORD WINAPI InterceptHostThread(PVOID arg)
@@ -7,11 +8,13 @@ DWORD WINAPI InterceptHostThread(PVOID arg)
 	//Initialize pipe server locks and events
 	InitializeCamServer();
 	//Setup hooks
-	Startup();
+	WMRCamInterceptHost::Startup();
+	WMRControllerInterceptHost::Startup();
 	//Start and run the pipe server
 	RunCamServer();
 	//Remove hooks
-	Shutdown();
+	WMRControllerInterceptHost::Shutdown();
+	WMRCamInterceptHost::Shutdown();
 	Sleep(10); //wait a bit in case a hook callback is not done yet
 	//Free remaining pipe server resources
 	CloseCamServer();

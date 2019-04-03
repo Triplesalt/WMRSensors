@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "WMRCamInterceptHost.h"
 #include "PipeServer.h"
+#include "HookCommon.h"
 
 extern "C"
 {
@@ -20,6 +21,7 @@ static void *g_pStartCameraStreamHook;
 static BYTE g_StartCameraStreamHook_Backup[12];
 static void *g_pStopCameraStreamHook;
 static BYTE g_StopCameraStreamHook_Backup[12];
+static HMODULE g_hMRUSBHost;
 static bool g_started = false;
 
 struct CameraFrameInfo
@@ -209,46 +211,9 @@ static const BYTE StopCameraStream_Mask[] = {
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
 };
 
-void *FindPattern(void *regionStart, size_t regionSize, const BYTE *pattern, const BYTE *mask, size_t patternSize)
-{
-	void *regionEnd = (void*)((UINT_PTR)regionStart + regionSize);
-	for (BYTE *curLoc = ((BYTE*)regionStart); (UINT_PTR)(curLoc + patternSize) <= (UINT_PTR)regionEnd; curLoc++)
-	{
-		bool found = true;
-		for (size_t i = 0; i < patternSize; i++)
-		{
-			if ((curLoc[i] & mask[i]) != (pattern[i] & mask[i]))
-			{
-				found = false;
-				break;
-			}
-		}
-		if (found)
-			return curLoc;
-	}
-	return nullptr;
-}
 
-void GetImageSection(HMODULE hModule, void *&pSection, size_t &sectionLen, const char *sectionName)
-{
-	pSection = nullptr;
-	sectionLen = 0;
 
-	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
-	PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((UINT_PTR)dosHeader + dosHeader->e_lfanew);
-	IMAGE_SECTION_HEADER *sectionHeaders = (IMAGE_SECTION_HEADER*)((UINT_PTR)ntHeaders + sizeof(IMAGE_NT_HEADERS));
-	for (unsigned int i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++)
-	{
-		if (!strncmp((char*)sectionHeaders[i].Name, sectionName, 8))
-		{
-			pSection = (void*)((UINT_PTR)hModule + sectionHeaders[i].VirtualAddress);
-			sectionLen = sectionHeaders[i].Misc.VirtualSize;
-			break;
-		}
-	}
-}
-
-void Startup()
+void WMRCamInterceptHost::Startup()
 {
 	if (g_started) return;
 
@@ -259,91 +224,96 @@ void Startup()
 	}
 
 	//InitializeCriticalSection(&g_imageLock);
-	HMODULE hMRUSBHost = nullptr;
-	if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, TEXT("MRUSBHost.dll"), &hMRUSBHost) || !hMRUSBHost)
+	g_hMRUSBHost = GetModuleHandle(TEXT("MRUSBHost.dll"));
+	if (!g_hMRUSBHost)
 	{
-		OnErrorLog("Can't find MRUSBHost.dll!\r\n");
+		OnErrorLog("ERROR: Can't find MRUSBHost.dll!\r\n");
+		OnErrorLog("Camera hooks are disabled.\r\n");
 		return;
 	}
 	void *pTextSection = nullptr;
 	size_t textSectionLen = 0;
-	GetImageSection(hMRUSBHost, pTextSection, textSectionLen, ".text");
+	GetImageSection(g_hMRUSBHost, pTextSection, textSectionLen, ".text");
 	if (!pTextSection || textSectionLen == 0)
 	{
-		OnErrorLog("Can't find the .text section of MRUSBHost.dll!\r\n");
+		FreeLibrary(g_hMRUSBHost);
+		OnErrorLog("ERROR: Can't find the .text section of MRUSBHost.dll!\r\n");
+		OnErrorLog("Camera hooks are disabled.\r\n");
 		return;
 	}
 
 	void *pDataSection = nullptr;
 	size_t dataSectionLen = 0;
-	GetImageSection(hMRUSBHost, pDataSection, dataSectionLen, ".data");
+	GetImageSection(g_hMRUSBHost, pDataSection, dataSectionLen, ".data");
 	if (!pDataSection || dataSectionLen == 0)
 	{
-		OnErrorLog("Can't find the .data section of MRUSBHost.dll!\r\n");
+		FreeLibrary(g_hMRUSBHost);
+		OnErrorLog("ERROR: Can't find the .data section of MRUSBHost.dll!\r\n");
+		OnErrorLog("Camera hooks are disabled.\r\n");
 		return;
 	}
 
 	DWORD oldProt = 0;
 	VirtualProtect(pTextSection, textSectionLen, PAGE_EXECUTE_READWRITE, &oldProt);
 
-	Oasis_OpenCameraStream = (tdOasis_OpenCameraStream)GetProcAddress(hMRUSBHost, "Oasis_OpenCameraStream");
-	Oasis_OpenMirroredCameraStream = (tdOasis_OpenCameraStream)GetProcAddress(hMRUSBHost, "Oasis_OpenMirroredCameraStream");
-	Oasis_CloseCameraStream = (tdOasis_CloseCameraStream)GetProcAddress(hMRUSBHost, "Oasis_CloseCameraStream");
-	Oasis_CloseMirroredCameraStream = (tdOasis_CloseCameraStream)GetProcAddress(hMRUSBHost, "Oasis_CloseMirroredCameraStream");
-	Oasis_StartCameraStream = (tdOasis_StartCameraStream)GetProcAddress(hMRUSBHost, "Oasis_StartCameraStream");
-	Oasis_StopCameraStream = (tdOasis_StopCameraStream)GetProcAddress(hMRUSBHost, "Oasis_StopCameraStream");
-	Oasis_LockFrame = (tdOasis_LockFrame)GetProcAddress(hMRUSBHost, "Oasis_LockFrame");
-	Oasis_UnlockFrame = (tdOasis_UnlockFrame)GetProcAddress(hMRUSBHost, "Oasis_UnlockFrame");
+	Oasis_OpenCameraStream = (tdOasis_OpenCameraStream)GetProcAddress(g_hMRUSBHost, "Oasis_OpenCameraStream");
+	Oasis_OpenMirroredCameraStream = (tdOasis_OpenCameraStream)GetProcAddress(g_hMRUSBHost, "Oasis_OpenMirroredCameraStream");
+	Oasis_CloseCameraStream = (tdOasis_CloseCameraStream)GetProcAddress(g_hMRUSBHost, "Oasis_CloseCameraStream");
+	Oasis_CloseMirroredCameraStream = (tdOasis_CloseCameraStream)GetProcAddress(g_hMRUSBHost, "Oasis_CloseMirroredCameraStream");
+	Oasis_StartCameraStream = (tdOasis_StartCameraStream)GetProcAddress(g_hMRUSBHost, "Oasis_StartCameraStream");
+	Oasis_StopCameraStream = (tdOasis_StopCameraStream)GetProcAddress(g_hMRUSBHost, "Oasis_StopCameraStream");
+	Oasis_LockFrame = (tdOasis_LockFrame)GetProcAddress(g_hMRUSBHost, "Oasis_LockFrame");
+	Oasis_UnlockFrame = (tdOasis_UnlockFrame)GetProcAddress(g_hMRUSBHost, "Oasis_UnlockFrame");
 
 	if (!Oasis_OpenCameraStream ||
 		!FindPattern(Oasis_OpenCameraStream, sizeof(OpenCameraStream_Pattern), OpenCameraStream_Pattern, OpenCameraStream_Mask, sizeof(OpenCameraStream_Pattern)))
 	{
-		OnErrorLog("Oasis_OpenCameraStream not found or has an unknown function body!\r\n");
+		OnErrorLog("ERROR: Oasis_OpenCameraStream not found or has an unknown function body!\r\n");
 		goto fail;
 	}
 	if (!Oasis_OpenMirroredCameraStream ||
 		!FindPattern(Oasis_OpenMirroredCameraStream, sizeof(OpenMirroredCameraStream_Pattern), OpenMirroredCameraStream_Pattern, OpenMirroredCameraStream_Mask, sizeof(OpenMirroredCameraStream_Pattern)))
 	{
-		OnErrorLog("Oasis_OpenMirroredCameraStream not found or has an unknown function body!\r\n");
+		OnErrorLog("ERROR: Oasis_OpenMirroredCameraStream not found or has an unknown function body!\r\n");
 		goto fail;
 	}
 	if (!Oasis_CloseCameraStream ||
 		!FindPattern(Oasis_CloseCameraStream, sizeof(CloseCameraStream_Pattern), CloseCameraStream_Pattern, CloseCameraStream_Mask, sizeof(CloseCameraStream_Pattern)))
 	{
-		OnErrorLog("Oasis_CloseCameraStream not found or has an unknown function body!\r\n");
+		OnErrorLog("ERROR: Oasis_CloseCameraStream not found or has an unknown function body!\r\n");
 		goto fail;
 	}
 	if (!Oasis_CloseMirroredCameraStream ||
 		!FindPattern(Oasis_CloseMirroredCameraStream, sizeof(CloseMirroredCameraStream_Pattern), CloseMirroredCameraStream_Pattern, CloseMirroredCameraStream_Mask, sizeof(CloseMirroredCameraStream_Pattern)))
 	{
-		OnErrorLog("Oasis_CloseMirroredCameraStream not found or has an unknown function body!\r\n");
+		OnErrorLog("ERROR: Oasis_CloseMirroredCameraStream not found or has an unknown function body!\r\n");
 		goto fail;
 	}
 	if (memcmp(Oasis_CloseCameraStream, Oasis_CloseMirroredCameraStream, sizeof(CloseCameraStream_Pattern)))
 	{
-		OnErrorLog("Oasis_CloseCameraStream and Oasis_CloseMirroredCameraStream entry points are different!\r\n");
+		OnErrorLog("ERROR: Oasis_CloseCameraStream and Oasis_CloseMirroredCameraStream entry points are different!\r\n");
 		goto fail;
 	}
 	if (!Oasis_StartCameraStream ||
 		!FindPattern(Oasis_StartCameraStream, sizeof(StartCameraStream_Pattern), StartCameraStream_Pattern, StartCameraStream_Mask, sizeof(StartCameraStream_Pattern)))
 	{
-		OnErrorLog("Oasis_StartCameraStream not found or has an unknown function body!\r\n");
+		OnErrorLog("ERROR: Oasis_StartCameraStream not found or has an unknown function body!\r\n");
 		goto fail;
 	}
 	if (!Oasis_StopCameraStream ||
 		!FindPattern(Oasis_StopCameraStream, sizeof(StopCameraStream_Pattern), StopCameraStream_Pattern, StopCameraStream_Mask, sizeof(StopCameraStream_Pattern)))
 	{
-		OnErrorLog("Oasis_StopCameraStream not found or has an unknown function body!\r\n");
+		OnErrorLog("ERROR: Oasis_StopCameraStream not found or has an unknown function body!\r\n");
 		goto fail;
 	}
 	if (!Oasis_LockFrame)
 	{
-		OnErrorLog("Oasis_LockFrame not found!\r\n");
+		OnErrorLog("ERROR: Oasis_LockFrame not found!\r\n");
 		goto fail;
 	}
 	if (!Oasis_UnlockFrame)
 	{
-		OnErrorLog("Oasis_LockFrame not found!\r\n");
+		OnErrorLog("ERROR: Oasis_LockFrame not found!\r\n");
 		goto fail;
 	}
 
@@ -352,7 +322,7 @@ void Startup()
 	{
 		if (FAILED(Oasis_OpenCameraStream((DWORD)(i + 1), OnCameraFrame, (UINT_PTR)(i + 1), &g_OwnCameraStreams[i])))
 		{
-			OnErrorLog("Unable to open a camera stream!\r\n");
+			OnErrorLog("ERROR: Unable to open a camera stream!\r\n");
 			goto fail;
 		}
 		StreamClientEntry *pCurEntry = g_OwnCameraStreams[i];
@@ -448,34 +418,38 @@ void Startup()
 	g_started = true;
 	fail:
 	VirtualProtect(pTextSection, textSectionLen, oldProt, &oldProt);
-	if (!g_started && Oasis_CloseCameraStream)
+	if (!g_started)
 	{
-		for (size_t i = 0; i < 4; i++)
+		if (Oasis_CloseCameraStream)
 		{
-			if (g_OwnCameraStreams[i])
+			for (size_t i = 0; i < 4; i++)
 			{
-				if (g_ActiveCameraStreamCounts[i] > 0)
+				if (g_OwnCameraStreams[i])
 				{
-					Oasis_StopCameraStream(g_OwnCameraStreams[i]);
-					OnStopCameraStream((DWORD)i);
+					if (g_ActiveCameraStreamCounts[i] > 0)
+					{
+						Oasis_StopCameraStream(g_OwnCameraStreams[i]);
+						OnStopCameraStream((DWORD)i);
+					}
+					Oasis_CloseCameraStream(g_OwnCameraStreams[i]);
+					g_OwnCameraStreams[i] = nullptr;
 				}
-				Oasis_CloseCameraStream(g_OwnCameraStreams[i]);
-				g_OwnCameraStreams[i] = nullptr;
 			}
 		}
+		FreeLibrary(g_hMRUSBHost);
+		OnErrorLog("Camera hooks are disabled.\r\n");
 	}
 }
 
-void Shutdown()
+void WMRCamInterceptHost::Shutdown()
 {
 	if (!g_started)
 		return;
-	HMODULE hMRUSBHost = nullptr;
-	if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, TEXT("MRUSBHost.dll"), &hMRUSBHost) && hMRUSBHost)
+	if (g_hMRUSBHost)
 	{
 		void *pTextSection = nullptr;
 		size_t textSectionLen = 0;
-		GetImageSection(hMRUSBHost, pTextSection, textSectionLen, ".text");
+		GetImageSection(g_hMRUSBHost, pTextSection, textSectionLen, ".text");
 		if (pTextSection && textSectionLen)
 		{
 			DWORD oldProt = 0;
@@ -522,6 +496,8 @@ void Shutdown()
 				}
 			}
 		}
+		FreeLibrary(g_hMRUSBHost);
+		g_hMRUSBHost = NULL;
 	}
 	g_started = false;
 }

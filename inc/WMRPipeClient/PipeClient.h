@@ -71,44 +71,45 @@ public:
 	virtual void OnClientLog(const char *line) = 0;
 };
 
-//Not implemented yet
 class IWMRControllerListener
 {
 public:
 	/* Called whenever the controller tracking starts. Usually called after the controller has been connected.
 	leftOrRight : 0 for left, 1 for right controller.
 	*/
-	virtual void OnTrackingStart(int leftOrRight) = 0;
+	virtual void OnTrackingStart(uint32_t handle) = 0;
 
 	/* Called whenever the controller tracking stops. Usually called after the controller has been disconnected.
 	leftOrRight : 0 for left, 1 for right controller.
 	*/
-	virtual void OnTrackingStop(int leftOrRight) = 0;
+	virtual void OnTrackingStop(uint32_t handle) = 0;
 
+	//Not implemented yet
 	/* Called whenever the controller tracking state changes. 
+	   See https://docs.microsoft.com/en-us/windows/mixed-reality/motion-controllers#controller-tracking-state
 	leftOrRight : 0 for left, 1 for right controller.
 	oldState : Old state value. Heavily dependant of driver internals, only use it for debugging purposes.
-	oldStateName : Old state name.
+	oldStateName : Old state name. Currently known values : Invalid, ConfusedPosition, BodyLocked, WorldLocked.
 	newState : New state value. Heavily dependant of driver internals, only use it for debugging purposes.
-	newStateName : New state name.
+	newStateName : New state name. Currently known values : Invalid, ConfusedPosition, BodyLocked, WorldLocked.
 	*/
-	virtual void OnTrackingStateChange(int leftOrRight, uint32_t oldState, const char *oldStateName, uint32_t newState, const char *newStateName) = 0;
+	virtual void OnTrackingStateChange(uint32_t handle, uint32_t leftOrRight, uint32_t oldState, const char *oldStateName, uint32_t newState, const char *newStateName) = 0;
 
 	/* Called whenever the controller tracking data stream starts. Usually called after the controller has been connected or moved.
 	leftOrRight : 0 for left, 1 for right controller.
 	*/
-	virtual void OnStreamStart(int leftOrRight) = 0;
+	virtual void OnStreamStart(uint32_t handle, uint32_t leftOrRight) = 0;
 
 	/* Called whenever the controller tracking data stream stops. Usually called after the controller has been disconnected or not moved for a while.
 	leftOrRight : 0 for left, 1 for right controller.
 	*/
-	virtual void OnStreamStop(int leftOrRight) = 0;
+	virtual void OnStreamStop(uint32_t handle, uint32_t leftOrRight) = 0;
 
 	/* Called whenever the driver has received controller tracking data.
 	leftOrRight : 0 for left, 1 for right controller.
 	data : Controller tracking data, see PipeCommon.h.
 	*/
-	virtual void OnStreamData(int leftOrRight, const ControllerStreamData &data) = 0;
+	virtual void OnStreamData(uint32_t handle, uint32_t leftOrRight, const ControllerStreamData &data) = 0;
 };
 
 /* Pipe Client. Not thread-safe. */
@@ -180,3 +181,16 @@ private:
 };
 
 PIPECLIENT_API void SendCloseHostCommand(uint32_t timeout = 2000);
+
+inline const char *GetDeviceTypeString(uint32_t leftOrRight)
+{
+	switch (leftOrRight)
+	{
+	case 0:
+		return "Left";
+	case 1:
+		return "Right";
+	default:
+		return "Unknown";
+	}
+}

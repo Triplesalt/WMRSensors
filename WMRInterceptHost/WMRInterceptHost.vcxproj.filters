@@ -35,6 +35,12 @@
     <ClInclude Include="..\inc\WMRPipeClient\PipeCommon.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="WMRControllerInterceptHost.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="HookCommon.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
@@ -47,6 +53,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="PipeServer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="WMRControllerInterceptHost.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="HookCommon.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

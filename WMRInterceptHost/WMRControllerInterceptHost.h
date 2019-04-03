@@ -1,6 +1,6 @@
 #pragma once
 
-namespace WMRCamInterceptHost
+namespace WMRControllerInterceptHost
 {
 	void Startup();
 	void Shutdown();

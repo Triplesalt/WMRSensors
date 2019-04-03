@@ -71,63 +71,67 @@ void WMRInterceptPipeClient::HandleHostMessage(unsigned char *data, size_t len)
 			}
 			break;
 		case PipePackage_ControllerTrackingStart:
-			if (len >= 6)
+			if (len >= 9)
 			{
-				BYTE leftOrRight = data[5];
+				DWORD handle = *(DWORD*)(&data[5]);
 				for (size_t i = 0; i < controllerListeners.size(); i++)
-					controllerListeners[i]->OnTrackingStart(leftOrRight);
+					controllerListeners[i]->OnTrackingStart(handle);
 			}
 			break;
 		case PipePackage_ControllerTrackingStop:
-			if (len >= 6)
+			if (len >= 9)
 			{
-				BYTE leftOrRight = data[5];
+				DWORD handle = *(DWORD*)(&data[5]);
 				for (size_t i = 0; i < controllerListeners.size(); i++)
-					controllerListeners[i]->OnTrackingStop(leftOrRight);
+					controllerListeners[i]->OnTrackingStop(handle);
 			}
 			break;
 		case PipePackage_ControllerTrackingState:
-			if (len >= 16)
+			if (len >= 20)
 			{
-				BYTE leftOrRight = data[5];
-				DWORD oldState = *(DWORD*)(&data[6]);
-				DWORD newState = *(DWORD*)(&data[10]);
-				BYTE oldStateNameLen = data[14];
-				BYTE newStateNameLen = data[15];
-				const char *oldStateName = (const char*)(&data[16]);
-				const char *newStateName = (const char*)(&data[16 + oldStateNameLen]);
-				if (len >= 16 + oldStateNameLen + newStateNameLen &&
+				DWORD handle = *(DWORD*)(&data[5]);
+				BYTE leftOrRight = data[9];
+				DWORD oldState = *(DWORD*)(&data[10]);
+				DWORD newState = *(DWORD*)(&data[14]);
+				BYTE oldStateNameLen = data[18];
+				BYTE newStateNameLen = data[19];
+				const char *oldStateName = (const char*)(&data[20]);
+				const char *newStateName = (const char*)(&data[20 + oldStateNameLen]);
+				if (len >= 24 + oldStateNameLen + newStateNameLen &&
 					oldStateNameLen > 0 && oldStateName[oldStateNameLen - 1] == 0 &&
 					newStateNameLen > 0 && newStateName[newStateNameLen - 1] == 0)
 				{
 					for (size_t i = 0; i < controllerListeners.size(); i++)
-						controllerListeners[i]->OnTrackingStateChange(leftOrRight, oldState, oldStateName, newState, newStateName);
+						controllerListeners[i]->OnTrackingStateChange(handle, leftOrRight, oldState, oldStateName, newState, newStateName);
 				}
 			}
 			break;
 		case PipePackage_ControllerStreamStart:
-			if (len >= 6)
+			if (len >= 10)
 			{
-				BYTE leftOrRight = data[5];
+				DWORD handle = *(DWORD*)(&data[5]);
+				BYTE leftOrRight = data[9];
 				for (size_t i = 0; i < controllerListeners.size(); i++)
-					controllerListeners[i]->OnStreamStart(leftOrRight);
+					controllerListeners[i]->OnStreamStart(handle, leftOrRight);
 			}
 			break;
 		case PipePackage_ControllerStreamStop:
-			if (len >= 6)
+			if (len >= 10)
 			{
-				BYTE leftOrRight = data[5];
+				DWORD handle = *(DWORD*)(&data[5]);
+				BYTE leftOrRight = data[9];
 				for (size_t i = 0; i < controllerListeners.size(); i++)
-					controllerListeners[i]->OnStreamStop(leftOrRight);
+					controllerListeners[i]->OnStreamStop(handle, leftOrRight);
 			}
 			break;
 		case PipePackage_ControllerStreamData:
-			if (len >= 6 + sizeof(ControllerStreamData))
+			if (len >= 10 + sizeof(ControllerStreamData))
 			{
-				BYTE leftOrRight = data[5];
-				const ControllerStreamData *pStreamData = (const ControllerStreamData*)(&data[6]);
+				DWORD handle = *(DWORD*)(&data[5]);
+				BYTE leftOrRight = data[9];
+				const ControllerStreamData *pStreamData = (const ControllerStreamData*)(&data[10]);
 				for (size_t i = 0; i < controllerListeners.size(); i++)
-					controllerListeners[i]->OnStreamData(leftOrRight, *pStreamData);
+					controllerListeners[i]->OnStreamData(handle, leftOrRight, *pStreamData);
 			}
 			break;
 		}
