@@ -1,13 +1,13 @@
-# WMRCamera
-Access the camera stream of Windows Mixed Reality HMDs
+# WMRSensors
+Access sensors and tracking status through the Windows Mixed Reality drivers
 
 ## Usage
 Inject WMRCamInterceptHost.dll into the WUDFHost process of the Mixed Reality driver (for instance with [Process Hacker](https://processhacker.sourceforge.io/)).
 Since there may be multiple WUDFHost processes, verify that the target process has its current directory inside System32\\DriverStore\\FileRepository\\hololenssensors.inf_amd64_\<hash\>.
 
-This will open a pipe at \\\\.\\pipe\\wmrcam, which local programs can connect to in order to retrieve camera images. See PipeServer.cpp or PipeClient.cpp if you want to retrieve the image data.
+This will open a pipe at \\\\.\\pipe\\wmrcam, which local programs can connect to in order to retrieve camera images and controller tracking information. 
 
-Open WMRCamViewer to view the active camera streams.
+To retrieve this information in external programs, use the WMRPipeClient library in your project and create a WMRInterceptPipeClient. A sample is included with the WMRViewer project.
 
 ## Build
 Building was only tested with Visual Studio Community 2017. x86 (32 bit) build is not supported.
