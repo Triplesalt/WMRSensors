@@ -95,21 +95,28 @@ public:
 	HANDLE hNewImageEvent;
 	HANDLE hCloseEvent;
 	HANDLE hClosedEvent;
+	HANDLE hWindowClosedEvent;
 	
 	HANDLE hTemp_WindowEvent;
-
-	HANDLE hUpdateThread;
 
 
 	int curFrameCount; clock_t lastMeasureTime;
 
 	HINSTANCE hInstance;
+	bool isStarted;
 public:
 	CamWindow(WORD id)
 	{
 		this->camID = id;
 		updateTexture = true;
 		updatedTexture = false;
+		isStarted = false;
+	}
+	bool IsStarted()
+	{
+		if (isStarted && WaitForSingleObject(this->hWindowClosedEvent, 0) == WAIT_OBJECT_0)
+			Close();
+		return isStarted;
 	}
 	bool Init(HINSTANCE hInstance, unsigned char count, int width, int height)
 	{
@@ -117,6 +124,7 @@ public:
 			return false;
 		this->hInstance = hInstance;
 		hTemp_WindowEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+		hWindowClosedEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 		CloseHandle(CreateThread(0,0, ShowCamWndThread, this, 0, NULL));
 		WaitForSingleObject(hTemp_WindowEvent, INFINITE);
 
@@ -142,7 +150,7 @@ public:
 			
 				glGenTextures(1, &frameTex1);
 				glGenTextures(1, &frameTex2);
-
+				
 				glGenBuffers(1, &frameVBuf1);
 				glBindBuffer(GL_ARRAY_BUFFER, frameVBuf1);
 				glBufferData(GL_ARRAY_BUFFER, sizeof(vertex2D)*4, frameVertices1, GL_STATIC_DRAW);
@@ -203,25 +211,42 @@ public:
 				hClosedEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 				InitializeCriticalSection(&updateFrameLock);
 
-				hUpdateThread = CreateThread(0,0, UpdateFrameThread, this, 0, NULL);
+				CloseHandle(CreateThread(0, 0, UpdateFrameThread, this, 0, NULL));
+				isStarted = true;
 				return true;
 			}
-			CloseWindow(hStreamWnd);
+			SendMessage(hStreamWnd, WM_USER + 0, 0, 0);
+			WaitForSingleObject(hWindowClosedEvent, INFINITE);
+			CloseHandle(hWindowClosedEvent);
 		}
 		return false;
 	}
 
 	void Close()
 	{
-		CloseWindow(hStreamWnd);
+		if (!isStarted)
+			return;
+		SendMessage(hStreamWnd, WM_USER + 0, 0, 0);
+		WaitForSingleObject(hWindowClosedEvent, INFINITE);
 		SetEvent(hCloseEvent);
 		WaitForSingleObject(hClosedEvent, INFINITE);
-		//TerminateThread(hUpdateThread, 0);
 		DeleteCriticalSection(&updateFrameLock);
 		CloseHandle(hNewImageEvent);
 		CloseHandle(hCloseEvent);
 		CloseHandle(hClosedEvent);
+		CloseHandle(hWindowClosedEvent);
+
+		glDeleteShader(frameVShader);
+		glDeleteShader(frameFShader);
+		glDeleteProgram(frameShaderProg);
+		glDeleteTextures(1, &frameTex1);
+		glDeleteTextures(1, &frameTex2);
+		glDeleteBuffers(1, &frameVBuf1);
+		glDeleteBuffers(1, &frameVBuf2);
+		glDeleteBuffers(1, &frameIBuf1);
+		glDeleteBuffers(1, &frameIBuf2);
 		wglDeleteContext(hGLRC);
+		isStarted = false;
 	}
 
 	void OnData(const BYTE *buffer)
@@ -251,17 +276,18 @@ private:
 	static DWORD WINAPI ShowCamWndThread(PVOID _pObject)
 	{
 		CamWindow *pObject = (CamWindow*)_pObject;
+		ResetEvent(pObject->hWindowClosedEvent);
 		pObject->CreateCamWindow(pObject->hInstance, 2*640, 480);
 		SetEvent(pObject->hTemp_WindowEvent);
 		if (pObject->hStreamWnd == NULL) return 0;
 		MSG msg; ZeroMemory(&msg, sizeof(MSG));
-		while (GetMessage(&msg, pObject->hStreamWnd, 0, 0))
+		while (GetMessage(&msg, NULL, 0, 0))
 		{
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
-			if (!IsWindow(pObject->hStreamWnd))
-				break;
 		}
+		SetEvent(pObject->hCloseEvent);
+		SetEvent(pObject->hWindowClosedEvent);
 		//ExitProcess(0);
 		return 0;
 	}
@@ -321,6 +347,12 @@ private:
 			return false;
 		} 
 		hGLRC = tmpHGLRC;
+		//glew is not quite perfectly suited to this, since there is no guarantee
+		//that different contexts share the same gl* function pointers. 
+		//glewInit would always need to be called on each context switch,
+		//but we are using multiple different contexts in different threads.
+		//In practice, this shouldn't be a problem unless a user has screens attached
+		//to different graphic cards with different drivers.
 		GLenum err = glewInit();
 		if (err != GLEW_OK)
 		{
@@ -337,7 +369,7 @@ private:
 		};
 
 		hGLRC = wglCreateContextAttribsARB(hDC, tmpHGLRC, attribs);
-	
+		
 		wglMakeCurrent(hDC,NULL);
 		wglDeleteContext(tmpHGLRC);
 		wglMakeCurrent(hDC, hGLRC);
@@ -430,6 +462,7 @@ private:
 		
 			//Sleep(10);
 		}
+		wglMakeCurrent(pObject->hDC, NULL);
 		SetEvent(pObject->hClosedEvent);
 		return 0;
 	}
@@ -465,7 +498,15 @@ CamWindow *CamWindow_Add(unsigned short camID, unsigned char count, unsigned int
 	for (size_t i = 0; i < camWindows.size(); i++)
 	{
 		if (camWindows[i]->camID == camID)
+		{
+			if (!camWindows[i]->IsStarted())
+			{
+				delete camWindows[i];
+				camWindows.erase(camWindows.begin() + i);
+				break;
+			}
 			return camWindows[i];
+		}
 	}
 
 	CamWindow *ret = new CamWindow(camID);
@@ -520,6 +561,12 @@ INT_PTR CALLBACK CameraWindowProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM
 	{
 	case WM_INITDIALOG:
 		return (INT_PTR)TRUE;
+	case WM_USER+0:
+		DestroyWindow(hDlg);
+		return (INT_PTR)FALSE;
+	case WM_DESTROY:
+		PostQuitMessage(0);
+		return (INT_PTR)FALSE;
 	}
 	return DefWindowProc(hDlg, message, wParam, lParam);
 }

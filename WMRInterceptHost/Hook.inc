@@ -12,7 +12,10 @@ _OnStopCameraStream PROTO FASTCALL
 EXTERN HookCrystalKeyStartIMUStream_RSPSubOffs:DWORD
 EXTERN HookCrystalKeyStopIMUStream_RSPSubOffs:DWORD
 EXTERN HookCrystalKeyStopIMUStream_CMPAddr:QWORD
+EXTERN HookControllerStateTransition_FormatString:QWORD
+EXTERN HookControllerStateTransition_ModuleNameString:QWORD
 
 _OnCrystalKeyStartIMUStream PROTO FASTCALL
 _OnSuccessCrystalKeyStartIMUStream PROTO FASTCALL
 _OnPostCrystalKeyStopIMUStream PROTO FASTCALL
+_OnControllerStateTransition PROTO FASTCALL

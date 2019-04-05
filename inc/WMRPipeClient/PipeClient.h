@@ -75,16 +75,17 @@ class IWMRControllerListener
 {
 public:
 	/* Called whenever the controller tracking starts. Usually called after the controller has been connected.
+	   Currently not reliable! May not be called at all. For now, use the information from OnTrackingStateChange or OnStream* callbacks.
 	leftOrRight : 0 for left, 1 for right controller.
 	*/
 	virtual void OnTrackingStart(uint32_t handle) = 0;
 
 	/* Called whenever the controller tracking stops. Usually called after the controller has been disconnected.
+	   Currently not reliable! May not be called at all. For now, use the information from OnTrackingStateChange or OnStream* callbacks.
 	leftOrRight : 0 for left, 1 for right controller.
 	*/
 	virtual void OnTrackingStop(uint32_t handle) = 0;
 
-	//Not implemented yet
 	/* Called whenever the controller tracking state changes. 
 	   See https://docs.microsoft.com/en-us/windows/mixed-reality/motion-controllers#controller-tracking-state
 	leftOrRight : 0 for left, 1 for right controller.

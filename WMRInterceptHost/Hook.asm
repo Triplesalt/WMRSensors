@@ -214,5 +214,22 @@ _Hook_CrystalKeyStopIMUStream PROC
 	JMP RAX
 _Hook_CrystalKeyStopIMUStream ENDP
 
+_Hook_ControllerStateTransition PROC
+	;The volatile registers RAX, RCX, RDX, R8, R10, R11 can be overwritten, only R9 is required by the caller.
+	MOV RCX, RBX ;pDriftManager
+	MOV RDX, R9 ;oldStateName
+	MOV R8, QWORD PTR [RSP+28h] ;newStateName
+	PUSH R9
+	SUB RSP, 20h
+	CALL _OnControllerStateTransition
+	ADD RSP, 20h
+	POP R9
+
+	;Backup
+	MOV RDX, QWORD PTR [HookControllerStateTransition_FormatString]
+	MOV RCX, QWORD PTR [HookControllerStateTransition_ModuleNameString]
+	RET
+_Hook_ControllerStateTransition ENDP
+
 _text ENDS
 END

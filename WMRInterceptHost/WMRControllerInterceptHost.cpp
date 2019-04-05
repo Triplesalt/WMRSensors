@@ -8,11 +8,15 @@ extern "C"
 	DWORD HookCrystalKeyStartIMUStream_RSPSubOffs;
 	DWORD HookCrystalKeyStopIMUStream_RSPSubOffs;
 	UINT_PTR HookCrystalKeyStopIMUStream_CMPAddr;
+	UINT_PTR HookControllerStateTransition_FormatString; //"%S Controller: Transition from %s -> %s"
+	UINT_PTR HookControllerStateTransition_ModuleNameString; //"AntiDriftStateMachine"
 }
 static void *g_pCrystalKeyStartIMUStreamHook;
 static BYTE g_CrystalKeyStartIMUStreamHook_Backup[15];
 static void *g_pCrystalKeyStopIMUStreamHook;
 static BYTE g_CrystalKeyStopIMUStreamHook_Backup[17];
+static void *g_pControllerStateTransitionHook;
+static BYTE g_ControllerStateTransitionHook_Backup[14];
 static HMODULE g_hMotionControllerHid;
 static HMODULE g_hMotionControllerSystem;
 static bool g_started = false;
@@ -33,6 +37,28 @@ struct IMUData
 	uint64_t unknown4[3];
 	DWORD unknown5; //known values : 0,1,2,3
 	DWORD padding3; //guessed
+};
+
+struct ControllerListHead
+{
+	//Either a self pointer or a ControllerListEntry.
+	void *pLeftLink;
+	//Either a self pointer or a ControllerListEntry.
+	void *pRightLink;
+};
+struct ControllerListEntry
+{
+	//Either another ControllerListEntry or the ControllerListHead.
+	void *pLeftLink;
+	//Either another ControllerListEntry or the ControllerListHead.
+	void *pRightLink;
+	//The controller handle used for the CrystalKey* functions.
+	DWORD controllerHandle;
+	//The actual object the CrystalKey* functions work with.
+	void *controllerObject;
+	//Reference counter object.
+	void *refCounterObject;
+	//Rest unknown.
 };
 
 typedef void(*DeviceStateChangeCallback)(DWORD controllerHandle, DWORD state, UINT_PTR userData);
@@ -70,6 +96,10 @@ static std::vector<ControllerIMUCallbackData> g_ControllerIMUCallbacks;
 unsigned int g_UsingControllerIMUSection = 0;
 
 static void *g_DeviceStateChangeCallbackPage;
+static DWORD g_ControllerIMUUserDataOffs;
+static DWORD g_ControllerIMUCallbackOffs;
+static DWORD g_ControllerActiveOffs;
+static ControllerListHead **g_ppControllerListHead;
 
 static void IMUStreamIntercept(DWORD controllerHandle, IMUData *imuData, UINT_PTR userData)
 {
@@ -196,9 +226,43 @@ extern "C" void _OnPostCrystalKeyStopIMUStream(DWORD controllerHandle)
 	}
 }
 
+static DWORD g_DriftManagerNewStateOffs;
+static DWORD g_DriftManagerOldStateOffs;
+static DWORD g_ControllerDriftManagerOffs;
+static DWORD g_ControllerHandleOffs;
+extern "C" void _OnControllerStateTransition(UINT_PTR pDriftManager, const char *oldStateName, const char *newStateName)
+{
+	DWORD controllerHandle = *(DWORD*)(pDriftManager - g_ControllerDriftManagerOffs + g_ControllerHandleOffs);
+	DWORD oldState = *(DWORD*)(pDriftManager + g_DriftManagerOldStateOffs);
+	DWORD newState = *(DWORD*)(pDriftManager + g_DriftManagerNewStateOffs);
+	DWORD controllerType = (DWORD)-1;
+	if (FAILED(CrystalKeyGetDeviceType(controllerHandle, &controllerType)))
+	{
+		InterlockedIncrement(&g_UsingControllerIMUSection);
+		if (!g_started)
+			InterlockedDecrement(&g_UsingControllerIMUSection);
+		else
+		{
+			EnterCriticalSection(&g_ControllerIMUSection);
+			for (size_t i = 0; i < g_ControllerIMUCallbacks.size(); i++)
+			{
+				if (g_ControllerIMUCallbacks[i].controllerHandle == controllerHandle)
+				{
+					controllerType = g_ControllerIMUCallbacks[i].type;
+					break;
+				}
+			}
+			LeaveCriticalSection(&g_ControllerIMUSection);
+			InterlockedDecrement(&g_UsingControllerIMUSection);
+		}
+	}
+	OnControllerTrackingStateUpdate(controllerHandle, (BYTE)controllerType, oldState, oldStateName, newState, newStateName);
+}
+
 //Hook.asm import
 extern "C" void _Hook_CrystalKeyStartIMUStream();
 extern "C" void _Hook_CrystalKeyStopIMUStream();
+extern "C" void _Hook_ControllerStateTransition();
 
 //MotionControllerHid.dll
 //48 89 98 ?? ?? ?? ?? 48 89 B0 ?? ?? ?? ??
@@ -238,44 +302,115 @@ static const BYTE CrystalKeyStopIMUStream_Mask[] = {
 };
 
 //MotionControllerSystem.dll
-
-
-struct ControllerListHead
-{
-	//Either a self pointer or a ControllerListEntry.
-	void *pLeftLink;
-	//Either a self pointer or a ControllerListEntry.
-	void *pRightLink;
+static const BYTE DriftManagerStateOffs_Pattern[] = {
+	0x8B, 0x4B, 0x00, 0x8B, 0x53, 0x00, 0x3B, 0xCA, 0x75, 0x00, 0x48, 0x8B, 0x85
 };
-struct ControllerListEntry
-{
-	//Either another ControllerListEntry or the ControllerListHead.
-	void *pLeftLink;
-	//Either another ControllerListEntry or the ControllerListHead.
-	void *pRightLink;
-	//The controller handle used for the CrystalKey* functions.
-	DWORD controllerHandle;
-	//The actual object the CrystalKey* functions work with.
-	void *controllerObject;
-	//Reference counter object.
-	void *refCounterObject;
-	//Rest unknown.
+static const BYTE DriftManagerStateOffs_Mask[] = {
+	0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF
 };
+
+static const BYTE DriftManagerUpdateStateHook_Pattern[] = {
+	0x48, 0x8D, 0x15, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x4C, 0x8B, 0xC6, 0xC5, 0xF8, 0x77, 0xE8, 0x00, 0x00, 0x00, 0x00
+};
+static const BYTE DriftManagerUpdateStateHook_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00
+};
+
+static const BYTE DriftManagerOffs_Pattern[] = {
+	0x49, 0x8D, 0x96, 0x00, 0x00, 0x00, 0x00, 0x49, 0x8D, 0x8E, 0x00, 0x00, 0x00, 0x00, 0x48, 0x89, 0x54, 0x24, 0x00, 0x4C, 0x89, 0x5C, 0x24
+};
+static const BYTE DriftManagerOffs_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF
+};
+
+static const BYTE ControllerHandleOffs_Pattern[] = {
+	0x48, 0x8B, 0x02, 0x83, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x75, 0x09, 0x48, 0x8B, 0x88, 0x00, 0x00, 0x00, 0x00, 0xEB, 0x02, 0x33, 0xC9
+};
+static const BYTE ControllerHandleOffs_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF
+};
+
+bool StartupStateTransitionHooks()
+{
+	void *pTextSection = nullptr;
+	size_t textSectionLen = 0;
+	GetImageSection(g_hMotionControllerSystem, pTextSection, textSectionLen, ".text");
+	if (!pTextSection || textSectionLen == 0)
+	{
+		OnErrorLog("ERROR: Can't find the .text section of MotionControllerSystem.dll!\r\n");
+		goto fail;
+	}
+
+	void *pDriftManagerStateOffsResult = FindPattern(pTextSection, textSectionLen, DriftManagerStateOffs_Pattern, DriftManagerStateOffs_Mask, sizeof(DriftManagerStateOffs_Pattern));
+	if (!pDriftManagerStateOffsResult)
+	{
+		OnErrorLog("ERROR: Can't find the DriftManagerStateOffs pattern in MotionControllerSystem.dll!\r\n");
+		goto fail;
+	}
+	g_DriftManagerNewStateOffs = *(BYTE*)((UINT_PTR)pDriftManagerStateOffsResult + 2);
+	g_DriftManagerOldStateOffs = *(BYTE*)((UINT_PTR)pDriftManagerStateOffsResult + 5);
+
+	void *pDriftManagerOffsResult = FindPattern(pTextSection, textSectionLen, DriftManagerOffs_Pattern, DriftManagerOffs_Mask, sizeof(DriftManagerOffs_Pattern));
+	if (!pDriftManagerOffsResult)
+	{
+		OnErrorLog("ERROR: Can't find the DriftManagerOffs pattern in MotionControllerSystem.dll!\r\n");
+		goto fail;
+	}
+	g_ControllerDriftManagerOffs = *(DWORD*)((UINT_PTR)pDriftManagerOffsResult + 10);
+
+	void *pControllerHandleOffsResult = FindPattern(pTextSection, textSectionLen, ControllerHandleOffs_Pattern, ControllerHandleOffs_Mask, sizeof(ControllerHandleOffs_Pattern));
+	if (!pControllerHandleOffsResult)
+	{
+		OnErrorLog("ERROR: Can't find the ControllerHandleOffs pattern in MotionControllerSystem.dll!\r\n");
+		goto fail;
+	}
+	g_ControllerHandleOffs = *(DWORD*)((UINT_PTR)pControllerHandleOffsResult + 15);
+	
+	void *pDriftManagerUpdateStateHookResult = FindPattern(pTextSection, textSectionLen, DriftManagerUpdateStateHook_Pattern, DriftManagerUpdateStateHook_Mask, sizeof(DriftManagerUpdateStateHook_Pattern));
+	if (!pDriftManagerUpdateStateHookResult)
+	{
+		OnErrorLog("ERROR: Can't find the DriftManagerUpdateStateHook pattern in MotionControllerSystem.dll!\r\n");
+		goto fail;
+	}
+
+	DWORD oldProt;
+	VirtualProtect(pTextSection, textSectionLen, PAGE_EXECUTE_READWRITE, &oldProt);
+
+	BYTE *pControllerStateTransitionHook = (BYTE*)pDriftManagerUpdateStateHookResult;
+	memcpy(g_ControllerStateTransitionHook_Backup, pControllerStateTransitionHook, 14);
+	g_pControllerStateTransitionHook = pControllerStateTransitionHook;
+
+	HookControllerStateTransition_FormatString = (UINT_PTR)pDriftManagerUpdateStateHookResult + 7 + *(DWORD*)((UINT_PTR)pDriftManagerUpdateStateHookResult + 3);
+	HookControllerStateTransition_ModuleNameString = (UINT_PTR)pDriftManagerUpdateStateHookResult + 14 + *(DWORD*)((UINT_PTR)pDriftManagerUpdateStateHookResult + 10);
+	pControllerStateTransitionHook[0] = 0x48;
+	pControllerStateTransitionHook[1] = 0xB8;
+	*(unsigned long long int*)(&pControllerStateTransitionHook[2]) = (unsigned long long int)&_Hook_ControllerStateTransition;
+	pControllerStateTransitionHook[10] = 0xFF;
+	pControllerStateTransitionHook[11] = 0xD0;
+	memset(&pControllerStateTransitionHook[12], 0x90, 2);
+
+	VirtualProtect(pTextSection, textSectionLen, oldProt, &oldProt);
+	
+	return true;
+fail:
+	OnErrorLog("Controller state update notifications are disabled.\r\n");
+	return false;
+}
 
 void WMRControllerInterceptHost::Startup()
 {
 	if (g_started)
 		return;
-	g_hMotionControllerHid = GetModuleHandle(TEXT("MotionControllerHid.dll"));
-	if (!g_hMotionControllerHid)
+	g_hMotionControllerHid = NULL;
+	if (!GetModuleHandleEx(0, TEXT("MotionControllerHid.dll"), &g_hMotionControllerHid) || !g_hMotionControllerHid)
 	{
 		OnErrorLog("ERROR: Can't find MotionControllerHid.dll!\r\n");
 		goto fail;
 	}
-	g_hMotionControllerSystem = GetModuleHandle(TEXT("MotionControllerSystem.dll"));
-	if (!g_hMotionControllerSystem)
+	g_hMotionControllerSystem = NULL;
+	if (!GetModuleHandleEx(0, TEXT("MotionControllerSystem.dll"), &g_hMotionControllerSystem) || !g_hMotionControllerSystem)
 	{
-		OnErrorLog("ERROR: Can't find MotionControllerHid.dll!\r\n");
+		OnErrorLog("ERROR: Can't find MotionControllerSystem.dll!\r\n");
 		goto fail;
 	}
 	void *pTextSection = nullptr;
@@ -343,10 +478,11 @@ void WMRControllerInterceptHost::Startup()
 		}
 		else
 		{
-			DWORD userDataOffs = *(DWORD*)((UINT_PTR)pIMUStreamCallbackOffsResult + 3);
-			DWORD callbackOffs = *(DWORD*)((UINT_PTR)pIMUStreamCallbackOffsResult + 10);
-			DWORD activeOffs = *(DWORD*)((UINT_PTR)pIMUStreamActiveOffsResult + 9);
-			ControllerListHead *pListHead = *(ControllerListHead**)(((UINT_PTR)pSearchControllerResult + 24) + *(DWORD*)((UINT_PTR)pSearchControllerResult + 20));
+			g_ControllerIMUUserDataOffs = *(DWORD*)((UINT_PTR)pIMUStreamCallbackOffsResult + 3);
+			g_ControllerIMUCallbackOffs = *(DWORD*)((UINT_PTR)pIMUStreamCallbackOffsResult + 10);
+			g_ControllerActiveOffs = *(DWORD*)((UINT_PTR)pIMUStreamActiveOffsResult + 9);
+			g_ppControllerListHead = (ControllerListHead**)(((UINT_PTR)pSearchControllerResult + 24) + *(DWORD*)((UINT_PTR)pSearchControllerResult + 20));
+			ControllerListHead *pListHead = *g_ppControllerListHead;
 			if (pListHead)
 			{
 				ControllerListEntry *pCurEntry = (ControllerListEntry*)pListHead;
@@ -358,12 +494,12 @@ void WMRControllerInterceptHost::Startup()
 						type < 2)
 					{
 						OnControllerTrackingStart(pCurEntry->controllerHandle);
-						if (*(DWORD*)((UINT_PTR)pCurEntry->controllerObject + activeOffs) == 1)
+						if (*(DWORD*)((UINT_PTR)pCurEntry->controllerObject + g_ControllerActiveOffs) == 1)
 						{
 							OnControllerStreamStart(pCurEntry->controllerHandle, (BYTE)type);
-							IMUStreamCallback oldCallback = (IMUStreamCallback)*(UINT_PTR*)((UINT_PTR)pCurEntry->controllerObject + callbackOffs);
+							IMUStreamCallback oldCallback = (IMUStreamCallback)*(UINT_PTR*)((UINT_PTR)pCurEntry->controllerObject + g_ControllerIMUCallbackOffs);
 							g_ControllerIMUCallbacks.push_back({ pCurEntry->controllerHandle, type, oldCallback });
-							*(UINT_PTR*)((UINT_PTR)pCurEntry->controllerObject + callbackOffs) = (UINT_PTR)(IMUStreamCallback)IMUStreamIntercept;
+							*(UINT_PTR*)((UINT_PTR)pCurEntry->controllerObject + g_ControllerIMUCallbackOffs) = (UINT_PTR)(IMUStreamCallback)IMUStreamIntercept;
 						}
 					}
 					else
@@ -382,7 +518,7 @@ void WMRControllerInterceptHost::Startup()
 	//The drawback is the memory leak of 4KiB (one page) / 64KiB of address space (allocation granularity).
 	g_DeviceStateChangeCallbackPage = VirtualAlloc(NULL, 12, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 	if (!g_DeviceStateChangeCallbackPage)
-		OnErrorLog("Unable to register a device state change callback (allocation failed)!\r\n");
+		OnErrorLog("WARNING: Unable to register a device state change callback (allocation failed)!\r\n");
 	else
 	{
 		BYTE *pDeviceStateChangeCallbackPage = (BYTE*)g_DeviceStateChangeCallbackPage;
@@ -392,10 +528,11 @@ void WMRControllerInterceptHost::Startup()
 		pDeviceStateChangeCallbackPage[10] = 0xFF;
 		pDeviceStateChangeCallbackPage[11] = 0xE0;
 		DWORD oldProt;
+		//TODO: Will fail if the controller driver is shut down. The callback may get removed after closing the WMR portal, triggering a shutdown(?)
 		if (!VirtualProtect(g_DeviceStateChangeCallbackPage, 12, PAGE_EXECUTE_READ, &oldProt) ||
 			FAILED(CrystalKeyRegisterForDeviceStateChange((DeviceStateChangeCallback)g_DeviceStateChangeCallbackPage, 1))) //Null userData values are rejected.
 		{
-			OnErrorLog("Unable to register a device state change callback!\r\n");
+			OnErrorLog("WARNING: Unable to register a device state change callback!\r\n");
 			VirtualFree(g_DeviceStateChangeCallbackPage, 0, MEM_RELEASE);
 			g_DeviceStateChangeCallbackPage = nullptr;
 		}
@@ -431,6 +568,8 @@ void WMRControllerInterceptHost::Startup()
 	memset(&pCrystalKeyStopIMUStream[12], 0x90, 5);
 
 	VirtualProtect(pTextSection, textSectionLen, oldProt, &oldProt);
+
+	StartupStateTransitionHooks();
 
 	g_started = true;
 fail:
@@ -468,6 +607,39 @@ void WMRControllerInterceptHost::Shutdown()
 		return;
 	if (g_hMotionControllerHid)
 	{
+		if (g_ControllerIMUSectionInitialized && g_ppControllerListHead)
+		{
+			std::vector<ControllerIMUCallbackData> controllerIMUCallbacks;
+			EnterCriticalSection(&g_ControllerIMUSection);
+			controllerIMUCallbacks.insert(controllerIMUCallbacks.end(), g_ControllerIMUCallbacks.begin(), g_ControllerIMUCallbacks.end());
+			LeaveCriticalSection(&g_ControllerIMUSection);
+
+			ControllerListHead *pListHead = *g_ppControllerListHead;
+			if (pListHead && controllerIMUCallbacks.size() > 0)
+			{
+				ControllerListEntry *pCurEntry = (ControllerListEntry*)pListHead;
+				while ((pCurEntry = (ControllerListEntry*)pCurEntry->pLeftLink) != (ControllerListEntry*)pListHead)
+				{
+					if (pCurEntry->controllerObject)
+					{
+						if (*(UINT_PTR*)((UINT_PTR)pCurEntry->controllerObject + g_ControllerIMUCallbackOffs) == (UINT_PTR)(IMUStreamCallback)IMUStreamIntercept)
+						{
+							UINT_PTR origCallback = 0;
+							for (size_t i = 0; i < controllerIMUCallbacks.size(); i++)
+							{
+								if (controllerIMUCallbacks[i].controllerHandle == pCurEntry->controllerHandle)
+								{
+									origCallback = (UINT_PTR)controllerIMUCallbacks[i].origCallback;
+									break;
+								}
+							}
+							*(UINT_PTR*)((UINT_PTR)pCurEntry->controllerObject + g_ControllerIMUCallbackOffs) = origCallback;
+						}
+					}
+				}
+			}
+		}
+
 		void *pTextSection = nullptr;
 		size_t textSectionLen = 0;
 		GetImageSection(g_hMotionControllerHid, pTextSection, textSectionLen, ".text");
@@ -493,6 +665,22 @@ void WMRControllerInterceptHost::Shutdown()
 	}
 	if (g_hMotionControllerSystem)
 	{
+		void *pTextSection = nullptr;
+		size_t textSectionLen = 0;
+		GetImageSection(g_hMotionControllerSystem, pTextSection, textSectionLen, ".text");
+		if (pTextSection && textSectionLen)
+		{
+			DWORD oldProt = 0;
+			VirtualProtect(pTextSection, textSectionLen, PAGE_EXECUTE_READWRITE, &oldProt);
+
+			if (g_pControllerStateTransitionHook)
+			{
+				memcpy(g_pControllerStateTransitionHook, g_ControllerStateTransitionHook_Backup, 14);
+			}
+
+			VirtualProtect(pTextSection, textSectionLen, oldProt, &oldProt);
+		}
+	
 		FreeLibrary(g_hMotionControllerSystem);
 		g_hMotionControllerSystem = NULL;
 	}

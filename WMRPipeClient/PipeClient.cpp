@@ -97,7 +97,7 @@ void WMRInterceptPipeClient::HandleHostMessage(unsigned char *data, size_t len)
 				BYTE newStateNameLen = data[19];
 				const char *oldStateName = (const char*)(&data[20]);
 				const char *newStateName = (const char*)(&data[20 + oldStateNameLen]);
-				if (len >= 24 + oldStateNameLen + newStateNameLen &&
+				if (len >= 20 + oldStateNameLen + newStateNameLen &&
 					oldStateNameLen > 0 && oldStateName[oldStateNameLen - 1] == 0 &&
 					newStateNameLen > 0 && newStateName[newStateNameLen - 1] == 0)
 				{

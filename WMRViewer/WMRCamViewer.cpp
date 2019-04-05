@@ -44,7 +44,7 @@ public:
 		if (id < 4 && sizeX == 640 && sizeY == 480)
 		{
 			lastBufferTimestamps[id] = timestamp;
-			memcpy(&(buffers[id >> 1].data())[(id & 1) * 640 * 480], buffer, 640 * 480);
+			memcpy(&(buffers[id >> 1].data())[(id & 1) * sizeX * sizeY], buffer, sizeX * sizeY);
 			if (timestamp == lastBufferTimestamps[id ^ 1])
 				CamWindow_OnData(id >> 1, 2, sizeX, sizeY, buffers[id >> 1].data());
 		}
@@ -94,7 +94,7 @@ public:
 	void OnStreamData(uint32_t handle, uint32_t leftOrRight, const ControllerStreamData &data)
 	{
 		uint64_t curTime = GetTickCount64();
-		if (curTime - lastIMUPrint >= 100)
+		if (curTime - lastIMUPrint >= 1000)
 		{
 			lastIMUPrint = curTime;
 			printf("Controller IMU stream data : %u (%s) (gyro (%7.3f|%7.3f|%7.3f), accel (%7.3f|%7.3f|%7.3f))\n",

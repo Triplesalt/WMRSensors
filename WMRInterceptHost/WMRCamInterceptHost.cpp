@@ -92,29 +92,41 @@ tdOasis_StopCameraStream Oasis_StopCameraStream;
 tdOasis_LockFrame Oasis_LockFrame;
 tdOasis_UnlockFrame Oasis_UnlockFrame;
 
+//The critical section is used to sync between different WMR driver threads and with a potential Shutdown() call.
+static unsigned int g_UsingOwnCameraStreamsSection = 0;
+static bool g_OwnCameraStreamsSectionStarted = false;
+static CRITICAL_SECTION g_OwnCameraStreamsSection;
+
 static StreamClientEntry *g_OwnCameraStreams[4] = {};
 static unsigned int g_ActiveCameraStreamCounts[4] = {};
 
 void OnCameraFrame(struct StreamClientEntry *handle, UINT_PTR lockFrameHandle, CameraFrameInfo *frameInfo, UINT_PTR userData)
 {
-	DWORD streamType = handle->streamType;
-	if (handle->streamType < 1 || handle->streamType > 4)
-		OnErrorLog("OnCameraFrame type out of known range!\r\n");
-	else
+	InterlockedIncrement(&g_UsingOwnCameraStreamsSection);
+	if (g_started)
 	{
-		void *frameData = nullptr; size_t frameSize = 0;
-		WORD gain = 0, exposureUs = 0, linePeriod = 0, exposureLinePeriods = 0;
-		if (FAILED(Oasis_LockFrame(handle, lockFrameHandle, &frameData, &frameSize, &gain, &exposureUs, &linePeriod, &exposureLinePeriods)))
-			OnErrorLog("Oasis_LockFrame failed!\r\n");
+		EnterCriticalSection(&g_OwnCameraStreamsSection);
+		DWORD streamType = handle->streamType;
+		if (handle->streamType < 1 || handle->streamType > 4)
+			OnErrorLog("OnCameraFrame type out of known range!\r\n");
 		else
 		{
-			if (frameSize != 640*480)
-				OnErrorLog("Oasis_LockFrame returned an unexpected frame size!\r\n");
+			void *frameData = nullptr; size_t frameSize = 0;
+			WORD gain = 0, exposureUs = 0, linePeriod = 0, exposureLinePeriods = 0;
+			if (FAILED(Oasis_LockFrame(handle, lockFrameHandle, &frameData, &frameSize, &gain, &exposureUs, &linePeriod, &exposureLinePeriods)))
+				OnErrorLog("Oasis_LockFrame failed!\r\n");
 			else
-				OnGetStreamImage(handle->streamType - 1, (BYTE*)frameData, 640, 480, gain, exposureUs, linePeriod, exposureLinePeriods, frameInfo->timestamp);
-			Oasis_UnlockFrame(handle, lockFrameHandle);
+			{
+				if (frameSize != 640 * 480)
+					OnErrorLog("Oasis_LockFrame returned an unexpected frame size!\r\n");
+				else
+					OnGetStreamImage(handle->streamType - 1, (BYTE*)frameData, 640, 480, gain, exposureUs, linePeriod, exposureLinePeriods, frameInfo->timestamp);
+				Oasis_UnlockFrame(handle, lockFrameHandle);
+			}
 		}
+		LeaveCriticalSection(&g_OwnCameraStreamsSection);
 	}
+	InterlockedDecrement(&g_UsingOwnCameraStreamsSection);
 }
 
 //Hook called after Oasis_OpenCameraStream.
@@ -135,28 +147,77 @@ extern "C" void _OnCloseCameraStream(StreamClientEntry *handle)
 
 extern "C" void _OnStartCameraStream(StreamClientEntry *handle)
 {
-	if (handle->streamType < 1 || handle->streamType > 4)
+	DWORD streamType = handle->streamType;
+	if (streamType < 1 || streamType > 4)
 		OnErrorLog("StartCameraStream type out of known range!\r\n");
-	else if (handle != g_OwnCameraStreams[handle->streamType - 1])
+	else if (handle != g_OwnCameraStreams[streamType - 1])
 	{
-		if (InterlockedIncrementAcquire(&g_ActiveCameraStreamCounts[handle->streamType - 1]) == 1)
+		StreamClientEntry *ownHandle = nullptr;
+		InterlockedIncrement(&g_UsingOwnCameraStreamsSection);
+		if (!g_started)
+			InterlockedDecrement(&g_UsingOwnCameraStreamsSection);
+		else
 		{
-			Oasis_StartCameraStream(g_OwnCameraStreams[handle->streamType - 1]);
-			OnStartCameraStream(handle->streamType - 1, 640, 480);
+			EnterCriticalSection(&g_OwnCameraStreamsSection);
+			ownHandle = g_OwnCameraStreams[streamType - 1];
+			bool notifyClient = false;
+			if (InterlockedIncrementAcquire(&g_ActiveCameraStreamCounts[streamType - 1]) == 1)
+			{
+				if (ownHandle == nullptr)
+				{
+					if (FAILED(Oasis_OpenCameraStream((DWORD)streamType, OnCameraFrame, (UINT_PTR)streamType, &g_OwnCameraStreams[streamType - 1])))
+					{
+						OnErrorLog("Oasis_OpenCameraStream failed!\r\n");
+						g_OwnCameraStreams[streamType - 1] = nullptr;
+					}
+					else
+					{
+						ownHandle = g_OwnCameraStreams[streamType - 1];
+						Oasis_StartCameraStream(ownHandle);
+					}
+				}
+				notifyClient = true;
+			}
+			LeaveCriticalSection(&g_OwnCameraStreamsSection);
+			InterlockedDecrement(&g_UsingOwnCameraStreamsSection);
+
+			if (notifyClient)
+				OnStartCameraStream(streamType - 1, 640, 480);
 		}
 	}
 }
 
 extern "C" void _OnStopCameraStream(StreamClientEntry *handle)
 {
-	if (handle->streamType < 1 || handle->streamType > 4)
+	DWORD streamType = handle->streamType;
+	if (streamType < 1 || streamType > 4)
 		OnErrorLog("StopCameraStream type out of known range!\r\n");
-	else if (handle != g_OwnCameraStreams[handle->streamType - 1])
+	else if (handle != g_OwnCameraStreams[streamType - 1])
 	{
-		if (InterlockedDecrementAcquire(&g_ActiveCameraStreamCounts[handle->streamType - 1]) == 0)
+		StreamClientEntry *ownHandle = nullptr;
+		InterlockedIncrement(&g_UsingOwnCameraStreamsSection);
+		if (!g_started)
+			InterlockedDecrement(&g_UsingOwnCameraStreamsSection);
+		else
 		{
-			Oasis_StopCameraStream(g_OwnCameraStreams[handle->streamType - 1]);
-			OnStopCameraStream(handle->streamType - 1);
+			bool notifyClient = false;
+			EnterCriticalSection(&g_OwnCameraStreamsSection);
+			ownHandle = g_OwnCameraStreams[streamType - 1];
+			if (InterlockedDecrementAcquire(&g_ActiveCameraStreamCounts[streamType - 1]) == 0)
+			{
+				if (ownHandle != nullptr)
+				{
+					Oasis_StopCameraStream(ownHandle);
+					Oasis_CloseCameraStream(ownHandle);
+					g_OwnCameraStreams[streamType - 1] = nullptr;
+				}
+				notifyClient = true;
+			}
+			LeaveCriticalSection(&g_OwnCameraStreamsSection);
+			InterlockedDecrement(&g_UsingOwnCameraStreamsSection);
+
+			if (notifyClient)
+				OnStopCameraStream(streamType - 1);
 		}
 	}
 }
@@ -224,8 +285,8 @@ void WMRCamInterceptHost::Startup()
 	}
 
 	//InitializeCriticalSection(&g_imageLock);
-	g_hMRUSBHost = GetModuleHandle(TEXT("MRUSBHost.dll"));
-	if (!g_hMRUSBHost)
+	g_hMRUSBHost = NULL;
+	if (!GetModuleHandleEx(0, TEXT("MRUSBHost.dll"), &g_hMRUSBHost) || !g_hMRUSBHost)
 	{
 		OnErrorLog("ERROR: Can't find MRUSBHost.dll!\r\n");
 		OnErrorLog("Camera hooks are disabled.\r\n");
@@ -341,10 +402,13 @@ void WMRCamInterceptHost::Startup()
 		}
 		else
 		{
-			Oasis_StartCameraStream(g_OwnCameraStreams[i]);
-			Oasis_StopCameraStream(g_OwnCameraStreams[i]);
+			Oasis_CloseCameraStream(g_OwnCameraStreams[i]);
+			g_OwnCameraStreams[i] = nullptr;
 		}
 	}
+
+	InitializeCriticalSection(&g_OwnCameraStreamsSection);
+	g_OwnCameraStreamsSectionStarted = true;
 
 	BYTE *pOpenCameraStream = (BYTE*)Oasis_OpenCameraStream;
 	BYTE *pOpenMirroredCameraStream = (BYTE*)Oasis_OpenMirroredCameraStream;
@@ -436,6 +500,8 @@ void WMRCamInterceptHost::Startup()
 				}
 			}
 		}
+		if (g_OwnCameraStreamsSectionStarted)
+			DeleteCriticalSection(&g_OwnCameraStreamsSection);
 		FreeLibrary(g_hMRUSBHost);
 		OnErrorLog("Camera hooks are disabled.\r\n");
 	}
@@ -483,6 +549,8 @@ void WMRCamInterceptHost::Shutdown()
 			VirtualProtect(pTextSection, textSectionLen, oldProt, &oldProt);
 		}
 
+		if (g_OwnCameraStreamsSectionStarted)
+			EnterCriticalSection(&g_OwnCameraStreamsSection);
 		if (Oasis_CloseCameraStream)
 		{
 			for (size_t i = 0; i < 4; i++)
@@ -496,8 +564,21 @@ void WMRCamInterceptHost::Shutdown()
 				}
 			}
 		}
+		if (g_OwnCameraStreamsSectionStarted)
+			LeaveCriticalSection(&g_OwnCameraStreamsSection);
+
 		FreeLibrary(g_hMRUSBHost);
 		g_hMRUSBHost = NULL;
 	}
 	g_started = false;
+
+	if (g_OwnCameraStreamsSectionStarted)
+	{
+		EnterCriticalSection(&g_OwnCameraStreamsSection);
+		LeaveCriticalSection(&g_OwnCameraStreamsSection);
+		//Busy waiting so nobody uses/is about to use the critical section.
+		while (g_UsingOwnCameraStreamsSection) { Sleep(0); }
+		DeleteCriticalSection(&g_OwnCameraStreamsSection);
+		g_OwnCameraStreamsSectionStarted = false;
+	}
 }
