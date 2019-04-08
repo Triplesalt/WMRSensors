@@ -69,7 +69,7 @@ _Hook_CloseCameraStream PROC
 	MOV RBP, RSP
 	ADD RBP, RBX
 	
-	MOV EBX, DWORD PTR [HookCloseCameraStream_StackSize] ;Custom
+	MOVSXD RBX, DWORD PTR [HookCloseCameraStream_StackSize] ;Custom
 	SUB RSP, RBX
 
 	JMP RAX
@@ -134,6 +134,70 @@ _Hook_StopCameraStream PROC
 
 	JMP RAX
 _Hook_StopCameraStream ENDP
+
+_Hook_OpenIMUStream PROC
+	POP RAX
+	PUSH RCX
+	PUSH RDX
+	SUB RSP, 28h
+
+	LEA R8, [_PostOpenIMUStream]
+	PUSH R8 ;Return address
+	;Backup
+	MOV QWORD PTR [RSP+18h], RBX
+	PUSH RBP
+	PUSH RSI
+	PUSH RDI
+	MOV R8, QWORD PTR [HookOpenIMUStream_RBPOffset]
+	MOV RBP, RSP
+	ADD RBP, R8
+	JMP RAX
+	
+	_PostOpenIMUStream:
+	MOV QWORD PTR [RSP+20h], RAX
+	TEST EAX, EAX
+	JS _FailOpenIMUStream
+
+	MOV RCX, QWORD PTR [RSP+30h]
+	MOV RDX, QWORD PTR [RSP+28h]
+	CALL _OnOpenIMUStream
+	
+	_FailOpenIMUStream:
+	ADD RSP, 20h
+	POP RAX
+	POP RDX
+	POP RCX
+	RET
+_Hook_OpenIMUStream ENDP
+
+_Hook_CloseIMUStream PROC
+	POP RAX
+	SUB RSP, 28h
+
+	LEA R8, [_PostCloseIMUStream]
+	PUSH R8 ;Return address
+	;Backup
+	MOV QWORD PTR [RSP+8h], RBX
+	PUSH RBP
+	MOV R8, QWORD PTR [HookCloseIMUStream_RBPOffset]
+	MOV RBP, RSP
+	ADD RBP, R8
+	MOVSXD R8, DWORD PTR [HookCloseIMUStream_RSPSubOffs]
+	SUB RSP, R8
+	JMP RAX
+	
+	_PostCloseIMUStream:
+	MOV QWORD PTR [RSP+20h], RAX
+	TEST EAX, EAX
+	JS _FailCloseIMUStream
+
+	CALL _OnCloseIMUStream
+	
+	_FailCloseIMUStream:
+	ADD RSP, 20h
+	POP RAX
+	RET
+_Hook_CloseIMUStream ENDP
 
 _Hook_CrystalKeyStartIMUStream PROC
 	;RCX : controller handle
@@ -207,7 +271,7 @@ _Hook_CrystalKeyStopIMUStream PROC
 	;Backup
 	MOV QWORD PTR [RSP+8h], RBX
 	PUSH RDI
-	MOV R10D, DWORD PTR [HookCrystalKeyStopIMUStream_RSPSubOffs]
+	MOVSXD R10, DWORD PTR [HookCrystalKeyStopIMUStream_RSPSubOffs]
 	SUB RSP, R10
 	MOV R10, QWORD PTR [HookCrystalKeyStopIMUStream_CMPAddr]
 	CMP DWORD PTR [R10], 0

@@ -24,9 +24,9 @@ static bool g_started = false;
 //120 bytes
 struct IMUData
 {
-	float gyroscope[3];
-	float unknown1;
 	float accelerometer[3];
+	float unknown1;
+	float gyroscope[3];
 	DWORD padding1; //guessed
 	uint64_t timestamp1; //100ns tick
 	uint64_t timestamp2; //smaller than timestamp1 (but still 100ns per tick)

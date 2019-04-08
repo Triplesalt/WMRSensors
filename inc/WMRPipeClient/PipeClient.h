@@ -51,10 +51,28 @@ public:
 	sizeY : Expected y-size of each image (amount of lines).
 	buffer : Buffer containing the grayscale image (8bpp). Must not be used after returning from the callback.
 	gain, exposureUs, linePeriod, exposureLinePeriods : Additional image metadata.
+	timestamp : Time stamp of the image. Matches for pairs of left/right camera images.
 	*/
 	virtual void OnImage(unsigned int id, unsigned int sizeX, unsigned int sizeY, const uint8_t *buffer,
 		unsigned short gain, unsigned short exposureUs, unsigned short linePeriod, unsigned short exposureLinePeriods,
 		uint64_t timestamp) = 0;
+};
+
+class IWMRHMDIMUListener
+{
+public:
+	/* Called whenever the HMD IMU data stream starts.
+	*/
+	virtual void OnStreamStart() = 0;
+
+	/* Called whenever the HMD IMU data stream stops. 
+	*/
+	virtual void OnStreamStop() = 0;
+
+	/* Called whenever the driver has received HMD IMU data.
+	data : IMU data, see PipeCommon.h.
+	*/
+	virtual void OnStreamData(const IMUSample &data) = 0;
 };
 
 class IWMRLogListener
@@ -118,6 +136,7 @@ class WMRInterceptPipeClient
 {
 	std::vector<IWMRPipeClientListener*> clientListeners;
 	std::vector<IWMRCameraListener*> cameraListeners;
+	std::vector<IWMRHMDIMUListener*> imuListeners;
 	std::vector<IWMRLogListener*> logListeners;
 	std::vector<IWMRControllerListener*> controllerListeners;
 	bool enableCamera;
@@ -151,6 +170,15 @@ public:
 	inline void RemoveCameraListener(IWMRCameraListener &listener)
 	{
 		cameraListeners.erase(std::remove(cameraListeners.begin(), cameraListeners.end(), &listener), cameraListeners.end());
+	}
+
+	inline void AddIMUListener(IWMRHMDIMUListener &listener)
+	{
+		imuListeners.push_back(&listener);
+	}
+	inline void RemoveIMUListener(IWMRHMDIMUListener &listener)
+	{
+		imuListeners.erase(std::remove(imuListeners.begin(), imuListeners.end(), &listener), imuListeners.end());
 	}
 
 	inline void AddLogListener(IWMRLogListener &listener)

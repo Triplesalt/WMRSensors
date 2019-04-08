@@ -2,11 +2,16 @@
 EXTERN HookCloseCameraStream_RBPOffset:QWORD
 EXTERN HookCloseCameraStream_StackSize:DWORD
 EXTERN HookStartCameraStream_RSPSubOffs:DWORD
+EXTERN HookOpenIMUStream_RBPOffset:QWORD
+EXTERN HookCloseIMUStream_RBPOffset:QWORD
+EXTERN HookCloseIMUStream_RSPSubOffs:DWORD
 
 _OnOpenCameraStream PROTO FASTCALL
 _OnCloseCameraStream PROTO FASTCALL
 _OnStartCameraStream PROTO FASTCALL
 _OnStopCameraStream PROTO FASTCALL
+_OnOpenIMUStream PROTO FASTCALL
+_OnCloseIMUStream PROTO FASTCALL
 
 ;WMRControllerInterceptHost.cpp
 EXTERN HookCrystalKeyStartIMUStream_RSPSubOffs:DWORD

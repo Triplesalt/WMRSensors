@@ -54,6 +54,60 @@ public:
 		}
 	}
 };
+class CamViewer_IMUListener : public IWMRHMDIMUListener
+{
+	uint64_t lastIMUPrint = 0;
+public:
+	void OnStreamStart()
+	{
+		printf("HMD IMU Stream started\r\n");
+	}
+
+	void OnStreamStop()
+	{
+		printf("HMD IMU Stream stopped\r\n");
+	}
+
+	void OnStreamData(const IMUSample &data)
+	{
+		uint64_t curTime = GetTickCount64();
+		if (curTime - lastIMUPrint >= 1000)
+		{
+			lastIMUPrint = curTime;
+			float gyroscopeVal[3] = {}; bool hasGyroVal = data.gyroscopeHistoryCount > 0;
+			if (hasGyroVal)
+			{
+				double sumX = 0, sumY = 0, sumZ = 0;
+				for (int i = 0; i < data.gyroscopeHistoryCount; i++)
+				{
+					sumX += data.gyroscopeXHistory[i];
+					sumY += data.gyroscopeYHistory[i];
+					sumZ += data.gyroscopeZHistory[i];
+				}
+				gyroscopeVal[0] = (float)(sumX / data.gyroscopeHistoryCount);
+				gyroscopeVal[1] = (float)(sumY / data.gyroscopeHistoryCount);
+				gyroscopeVal[2] = (float)(sumZ / data.gyroscopeHistoryCount);
+			}
+			float acceleroVal[3] = {}; bool hasAccelerometerVal = data.accelerometerHistoryCount > 0;
+			if (hasAccelerometerVal)
+			{
+				double sumX = 0, sumY = 0, sumZ = 0;
+				for (int i = 0; i < data.accelerometerHistoryCount; i++)
+				{
+					sumX += data.accelerometerXHistory[i];
+					sumY += data.accelerometerYHistory[i];
+					sumZ += data.accelerometerZHistory[i];
+				}
+				acceleroVal[0] = (float)(sumX / data.accelerometerHistoryCount);
+				acceleroVal[1] = (float)(sumY / data.accelerometerHistoryCount);
+				acceleroVal[2] = (float)(sumZ / data.accelerometerHistoryCount);
+			}
+			printf("HMD IMU stream data : gyro (%7.3f|%7.3f|%7.3f), accel (%7.3f|%7.3f|%7.3f)\n",
+				gyroscopeVal[0], gyroscopeVal[1], gyroscopeVal[2],
+				acceleroVal[0], acceleroVal[1], acceleroVal[2]);
+		}
+	}
+};
 class CamViewer_LogListener : public IWMRLogListener
 {
 public:
@@ -120,6 +174,8 @@ int _tmain(int argc, _TCHAR* argv[])
 		client.AddClientListener(clientListener);
 		CamViewer_CameraListener cameraListener;
 		client.AddCameraListener(cameraListener);
+		CamViewer_IMUListener imuListener;
+		client.AddIMUListener(imuListener);
 		CamViewer_LogListener logListener;
 		client.AddLogListener(logListener);
 		CamViewer_ControllerListener controllerListener;

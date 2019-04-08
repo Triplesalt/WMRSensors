@@ -10,6 +10,7 @@
 
 #define SERVER_MAXCONTROLLERSTATEUPDATES 16
 #define SERVER_MAXCONTROLLERSTREAMDATA 16
+#define SERVER_MAXIMUSAMPLES 2
 
 static HANDLE g_hServerClosedEvent;
 static HANDLE g_hClosePipeEvent;
@@ -281,6 +282,73 @@ void OnStopCameraStream(DWORD id)
 		delete[] stopPackage;
 	LeaveCriticalSection(&g_packageQueueLock);
 }
+
+void OnHMDIMUStreamStart()
+{
+	BYTE *startPackage = new BYTE[5];
+	*(DWORD*)(&startPackage[0]) = 5;
+	startPackage[4] = PipePackage_IMUStreamStart;
+
+	auto redundancyLambda = [](BYTE *otherPackage, PipePackageID otherPackageType) -> int
+	{
+		if (otherPackageType == PipePackage_IMUStreamStart) return 1;
+		if (otherPackageType == PipePackage_IMUStreamStop) return 2;
+		return 0;
+	};
+
+	EnterCriticalSection(&g_packageQueueLock);
+	if (InsertPackage(startPackage, PipePackage_IMUStreamStart, redundancyLambda, true))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] startPackage;
+	LeaveCriticalSection(&g_packageQueueLock);
+}
+
+void OnHMDIMUStreamStop()
+{
+	BYTE *stopPackage = new BYTE[5];
+	*(DWORD*)(&stopPackage[0]) = 5;
+	stopPackage[4] = PipePackage_IMUStreamStop;
+
+	auto redundancyLambda = [](BYTE *otherPackage, PipePackageID otherPackageType) -> int
+	{
+		if (otherPackageType == PipePackage_IMUStreamStop) return 1;
+		if (otherPackageType == PipePackage_IMUStreamStart) return 2;
+		return 0;
+	};
+
+	EnterCriticalSection(&g_packageQueueLock);
+	if (InsertPackage(stopPackage, PipePackage_IMUStreamStop, redundancyLambda, true))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] stopPackage;
+	LeaveCriticalSection(&g_packageQueueLock);
+}
+
+void OnHMDIMUSample(const IMUSample &sample)
+{
+	DWORD pkLen = 5 + sizeof(IMUSample);
+	BYTE *samplePackage = new BYTE[pkLen];
+	*(DWORD*)(&samplePackage[0]) = pkLen;
+	samplePackage[4] = PipePackage_IMUStreamSample;
+	memcpy(&samplePackage[5], &sample, sizeof(IMUSample));
+
+	size_t sampleCount = 0;
+	auto redundancyLambda = [&sampleCount](BYTE *otherPackage, PipePackageID otherPackageType) -> int
+	{
+		if (otherPackageType == PipePackage_IMUStreamSample &&
+			++sampleCount >= SERVER_MAXIMUSAMPLES) return 1;
+		return 0;
+	};
+
+	EnterCriticalSection(&g_packageQueueLock);
+	if (InsertPackage(samplePackage, PipePackage_IMUStreamSample, redundancyLambda, false))
+		SetEvent(g_hNewPackageEvent);
+	else
+		delete[] samplePackage;
+	LeaveCriticalSection(&g_packageQueueLock);
+}
+
 
 void OnErrorLog(const char *error)
 {

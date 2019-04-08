@@ -8,6 +8,9 @@ extern "C"
 	UINT_PTR HookCloseCameraStream_RBPOffset;
 	DWORD HookCloseCameraStream_StackSize;
 	DWORD HookStartCameraStream_RSPSubOffs;
+	UINT_PTR HookOpenIMUStream_RBPOffset;
+	UINT_PTR HookCloseIMUStream_RBPOffset;
+	DWORD HookCloseIMUStream_RSPSubOffs;
 }
 static void *g_pOpenCameraStreamHook;
 static BYTE g_OpenCameraStreamHook_Backup[13];
@@ -21,6 +24,10 @@ static void *g_pStartCameraStreamHook;
 static BYTE g_StartCameraStreamHook_Backup[12];
 static void *g_pStopCameraStreamHook;
 static BYTE g_StopCameraStreamHook_Backup[12];
+static void *g_pOpenIMUStreamHook;
+static BYTE g_OpenIMUStreamHook_Backup[13];
+static void *g_pCloseIMUStreamHook;
+static BYTE g_CloseIMUStreamHook_Backup[18];
 static HMODULE g_hMRUSBHost;
 static bool g_started = false;
 
@@ -33,6 +40,8 @@ struct CameraFrameInfo
 };
 typedef void(*CameraFrameCallback)(struct StreamClientEntry *handle, UINT_PTR lockFrameHandle, CameraFrameInfo *frameInfo, UINT_PTR userData);
 
+typedef void(*IMUSampleCallback)(IMUSample *sample, UINT_PTR userData);
+
 typedef HRESULT(*tdOasis_LockFrame)(
 	struct StreamClientEntry *handle, UINT_PTR lockFrameHandle,
 	void **pFrameDataOut, size_t *pFrameSizeOut, 
@@ -43,6 +52,8 @@ typedef HRESULT(*tdOasis_OpenCameraStream)(DWORD streamType, CameraFrameCallback
 typedef HRESULT(*tdOasis_CloseCameraStream)(struct StreamClientEntry *handle);
 typedef HRESULT(*tdOasis_StartCameraStream)(struct StreamClientEntry *handle);
 typedef HRESULT(*tdOasis_StopCameraStream)(struct StreamClientEntry *handle);
+typedef HRESULT(*tdOasis_OpenIMUStream)(IMUSampleCallback userCallback, UINT_PTR userData);
+typedef HRESULT(*tdOasis_CloseIMUStream)();
 
 struct StreamClientHead
 {
@@ -91,6 +102,8 @@ tdOasis_StartCameraStream Oasis_StartCameraStream;
 tdOasis_StopCameraStream Oasis_StopCameraStream;
 tdOasis_LockFrame Oasis_LockFrame;
 tdOasis_UnlockFrame Oasis_UnlockFrame;
+tdOasis_OpenIMUStream Oasis_OpenIMUStream;
+tdOasis_CloseIMUStream Oasis_CloseIMUStream;
 
 //The critical section is used to sync between different WMR driver threads and with a potential Shutdown() call.
 static unsigned int g_UsingOwnCameraStreamsSection = 0;
@@ -100,7 +113,7 @@ static CRITICAL_SECTION g_OwnCameraStreamsSection;
 static StreamClientEntry *g_OwnCameraStreams[4] = {};
 static unsigned int g_ActiveCameraStreamCounts[4] = {};
 
-void OnCameraFrame(struct StreamClientEntry *handle, UINT_PTR lockFrameHandle, CameraFrameInfo *frameInfo, UINT_PTR userData)
+static void OnCameraFrame(struct StreamClientEntry *handle, UINT_PTR lockFrameHandle, CameraFrameInfo *frameInfo, UINT_PTR userData)
 {
 	InterlockedIncrement(&g_UsingOwnCameraStreamsSection);
 	if (g_started)
@@ -222,11 +235,45 @@ extern "C" void _OnStopCameraStream(StreamClientEntry *handle)
 	}
 }
 
+static StreamClientEntry **g_ppCurIMUStreamClient;
+static IMUSampleCallback g_origIMUSampleCallback;
+
+static void OnIMUSample(IMUSample *sample, UINT_PTR userData)
+{
+	OnHMDIMUSample(*sample);
+	g_origIMUSampleCallback(sample, userData);
+}
+extern "C" void _OnOpenIMUStream()
+{
+	StreamClientEntry *pNewClient = *g_ppCurIMUStreamClient;
+	if (!pNewClient)
+		OnErrorLog("Oasis_OpenIMUStream succeeded but did not create a new client!\r\n");
+	else
+	{
+		OnHMDIMUStreamStart();
+		g_origIMUSampleCallback = (IMUSampleCallback)pNewClient->userCallback;
+		pNewClient->userCallback = OnIMUSample;
+	}
+}
+extern "C" void _OnCloseIMUStream()
+{
+	StreamClientEntry *pNewClient = *g_ppCurIMUStreamClient;
+	if (pNewClient)
+		OnErrorLog("Oasis_CloseIMUStream succeeded but did not set the client to null!\r\n");
+	else
+	{
+		OnHMDIMUStreamStop();
+		g_origIMUSampleCallback = nullptr;
+	}
+}
+
 //Hook.asm import
 extern "C" void _Hook_OpenCameraStream();
 extern "C" void _Hook_CloseCameraStream();
 extern "C" void _Hook_StartCameraStream();
 extern "C" void _Hook_StopCameraStream();
+extern "C" void _Hook_OpenIMUStream();
+extern "C" void _Hook_CloseIMUStream();
 
 //MRUSBHost.dll
 //40 55 53 56 57 41 54 41 55 41 56 41 57
@@ -270,6 +317,27 @@ static const BYTE StopCameraStream_Pattern[] = {
 };
 static const BYTE StopCameraStream_Mask[] = {
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
+//48 89 5C 24 18 55 56 57 48 8D 6C 24 ??
+static const BYTE OpenIMUStream_Pattern[] = {
+	0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0x00
+};
+static const BYTE OpenIMUStream_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00
+};
+//F0 48 0F B1 0D ?? ?? ?? ?? 74 ??
+static const BYTE OpenIMUStream_SetClientHandle_Pattern[] = {
+	0xF0, 0x48, 0x0F, 0xB1, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x74, 0x00
+};
+static const BYTE OpenIMUStream_SetClientHandle_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00
+};
+//48 89 5C 24 08 55 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ??
+static const BYTE CloseIMUStream_Pattern[] = {
+	0x48, 0x89, 0x5C, 0x24, 0x08, 0x55, 0x48, 0x8D, 0x6C, 0x24, 0x00, 0x48, 0x81, 0xEC, 0x00, 0x00, 0x00, 0x00
+};
+static const BYTE CloseIMUStream_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00
 };
 
 
@@ -325,6 +393,8 @@ void WMRCamInterceptHost::Startup()
 	Oasis_StopCameraStream = (tdOasis_StopCameraStream)GetProcAddress(g_hMRUSBHost, "Oasis_StopCameraStream");
 	Oasis_LockFrame = (tdOasis_LockFrame)GetProcAddress(g_hMRUSBHost, "Oasis_LockFrame");
 	Oasis_UnlockFrame = (tdOasis_UnlockFrame)GetProcAddress(g_hMRUSBHost, "Oasis_UnlockFrame");
+	Oasis_OpenIMUStream = (tdOasis_OpenIMUStream)GetProcAddress(g_hMRUSBHost, "Oasis_OpenIMUStream");
+	Oasis_CloseIMUStream = (tdOasis_CloseIMUStream)GetProcAddress(g_hMRUSBHost, "Oasis_CloseIMUStream");
 
 	if (!Oasis_OpenCameraStream ||
 		!FindPattern(Oasis_OpenCameraStream, sizeof(OpenCameraStream_Pattern), OpenCameraStream_Pattern, OpenCameraStream_Mask, sizeof(OpenCameraStream_Pattern)))
@@ -374,8 +444,34 @@ void WMRCamInterceptHost::Startup()
 	}
 	if (!Oasis_UnlockFrame)
 	{
-		OnErrorLog("ERROR: Oasis_LockFrame not found!\r\n");
+		OnErrorLog("ERROR: Oasis_UnlockFrame not found!\r\n");
 		goto fail;
+	}
+	if (!Oasis_OpenIMUStream ||
+		!FindPattern(Oasis_OpenIMUStream, sizeof(OpenIMUStream_Pattern), OpenIMUStream_Pattern, OpenIMUStream_Mask, sizeof(OpenIMUStream_Pattern)))
+	{
+		OnErrorLog("ERROR: Oasis_OpenIMUStream not found or has an unknown function body!\r\n");
+		goto fail;
+	}
+	if (!Oasis_CloseIMUStream ||
+		!FindPattern(Oasis_CloseIMUStream, sizeof(CloseIMUStream_Pattern), CloseIMUStream_Pattern, CloseIMUStream_Mask, sizeof(CloseIMUStream_Pattern)))
+	{
+		OnErrorLog("ERROR: Oasis_CloseIMUStream not found or has an unknown function body!\r\n");
+		goto fail;
+	}
+
+	void *pOpenIMUStream_SetClientHandle = FindPattern(Oasis_OpenIMUStream, 512, OpenIMUStream_SetClientHandle_Pattern, OpenIMUStream_SetClientHandle_Mask, sizeof(OpenIMUStream_SetClientHandle_Pattern));
+	if (!pOpenIMUStream_SetClientHandle)
+	{
+		OnErrorLog("ERROR: Unable to find the OpenIMUStream_SetClientHandle pattern in MRUSBHost.dll!\r\n");
+		goto fail;
+	}
+	g_ppCurIMUStreamClient = (StreamClientEntry**)((UINT_PTR)pOpenIMUStream_SetClientHandle + 9 + *(DWORD*)((UINT_PTR)pOpenIMUStream_SetClientHandle + 5));
+	if (*g_ppCurIMUStreamClient != nullptr)
+	{
+		g_origIMUSampleCallback = (IMUSampleCallback)(*g_ppCurIMUStreamClient)->userCallback;
+		(*g_ppCurIMUStreamClient)->userCallback = OnIMUSample;
+		OnHMDIMUStreamStart();
 	}
 
 	//Hoping that no other thread calls these functions or modifies the stream client list during this operation.
@@ -407,6 +503,7 @@ void WMRCamInterceptHost::Startup()
 		}
 	}
 
+
 	InitializeCriticalSection(&g_OwnCameraStreamsSection);
 	g_OwnCameraStreamsSectionStarted = true;
 
@@ -416,6 +513,8 @@ void WMRCamInterceptHost::Startup()
 	BYTE *pCloseMirroredCameraStream = (BYTE*)Oasis_CloseMirroredCameraStream;
 	BYTE *pStartCameraStream = (BYTE*)Oasis_StartCameraStream;
 	BYTE *pStopCameraStream = (BYTE*)Oasis_StopCameraStream;
+	BYTE *pOpenIMUStream = (BYTE*)Oasis_OpenIMUStream;
+	BYTE *pCloseIMUStream = (BYTE*)Oasis_CloseIMUStream;
 
 	memcpy(g_OpenCameraStreamHook_Backup, pOpenCameraStream, 13);
 	g_pOpenCameraStreamHook = pOpenCameraStream;
@@ -478,6 +577,29 @@ void WMRCamInterceptHost::Startup()
 	*(unsigned long long int*)(&pStopCameraStream[2]) = (unsigned long long int)&_Hook_StopCameraStream;
 	pStopCameraStream[10] = 0xFF;
 	pStopCameraStream[11] = 0xD0;
+
+	memcpy(g_OpenIMUStreamHook_Backup, pOpenIMUStream, 13);
+	g_pOpenIMUStreamHook = pOpenIMUStream;
+
+	HookOpenIMUStream_RBPOffset = (UINT_PTR)(INT_PTR)(char)(((BYTE*)pOpenIMUStream)[12]);
+	pOpenIMUStream[0] = 0x48;
+	pOpenIMUStream[1] = 0xB8;
+	*(unsigned long long int*)(&pOpenIMUStream[2]) = (unsigned long long int)&_Hook_OpenIMUStream;
+	pOpenIMUStream[10] = 0xFF;
+	pOpenIMUStream[11] = 0xD0;
+	pOpenIMUStream[12] = 0x90;
+
+	memcpy(g_CloseIMUStreamHook_Backup, pCloseIMUStream, 18);
+	g_pCloseIMUStreamHook = pCloseIMUStream;
+
+	HookCloseIMUStream_RBPOffset = (UINT_PTR)(INT_PTR)(char)(((BYTE*)pCloseIMUStream)[10]);
+	HookCloseIMUStream_RSPSubOffs = *(DWORD*)(&((BYTE*)pCloseIMUStream)[14]);
+	pCloseIMUStream[0] = 0x48;
+	pCloseIMUStream[1] = 0xB8;
+	*(unsigned long long int*)(&pCloseIMUStream[2]) = (unsigned long long int)&_Hook_CloseIMUStream;
+	pCloseIMUStream[10] = 0xFF;
+	pCloseIMUStream[11] = 0xD0;
+	memset(&pCloseIMUStream[12], 0x90, 6);
 
 	g_started = true;
 	fail:
@@ -545,6 +667,14 @@ void WMRCamInterceptHost::Shutdown()
 			{
 				memcpy(g_pStopCameraStreamHook, g_StopCameraStreamHook_Backup, 12);
 			}
+			if (g_pOpenIMUStreamHook)
+			{
+				memcpy(g_pOpenIMUStreamHook, g_OpenIMUStreamHook_Backup, 13);
+			}
+			if (g_pCloseIMUStreamHook)
+			{
+				memcpy(g_pCloseIMUStreamHook, g_CloseIMUStreamHook_Backup, 18);
+			}
 
 			VirtualProtect(pTextSection, textSectionLen, oldProt, &oldProt);
 		}
@@ -566,6 +696,12 @@ void WMRCamInterceptHost::Shutdown()
 		}
 		if (g_OwnCameraStreamsSectionStarted)
 			LeaveCriticalSection(&g_OwnCameraStreamsSection);
+
+		if (*g_ppCurIMUStreamClient && g_origIMUSampleCallback)
+		{
+			(*g_ppCurIMUStreamClient)->userCallback = g_origIMUSampleCallback;
+			g_origIMUSampleCallback = nullptr;
+		}
 
 		FreeLibrary(g_hMRUSBHost);
 		g_hMRUSBHost = NULL;

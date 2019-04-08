@@ -59,6 +59,22 @@ void WMRInterceptPipeClient::HandleHostMessage(unsigned char *data, size_t len)
 				}
 			}
 			break;
+		case PipePackage_IMUStreamStart:
+			for (size_t i = 0; i < imuListeners.size(); i++)
+				imuListeners[i]->OnStreamStart();
+			break;
+		case PipePackage_IMUStreamStop:
+			for (size_t i = 0; i < imuListeners.size(); i++)
+				imuListeners[i]->OnStreamStop();
+			break;
+		case PipePackage_IMUStreamSample:
+			if (len >= 5 + sizeof(IMUSample))
+			{
+				const IMUSample *pSample = (const IMUSample*)(&data[5]);
+				for (size_t i = 0; i < imuListeners.size(); i++)
+					imuListeners[i]->OnStreamData(*pSample);
+			}
+			break;
 		case PipePackage_Log:
 			if (len >= 6)
 			{

@@ -10,6 +10,9 @@ void OnGetStreamImage(DWORD id, const BYTE *buf, unsigned short sizeX, unsigned 
 	unsigned short gain, unsigned short exposureUs, unsigned short linePeriod, unsigned short exposureLinePeriods,
 	uint64_t timestamp);
 void OnStopCameraStream(DWORD id);
+void OnHMDIMUStreamStart();
+void OnHMDIMUStreamStop();
+void OnHMDIMUSample(const IMUSample &sample);
 void OnErrorLog(const char *error);
 void OnControllerTrackingStart(DWORD handle);
 void OnControllerTrackingStop(DWORD handle);
