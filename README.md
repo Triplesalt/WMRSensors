@@ -2,10 +2,11 @@
 Access sensors and tracking status through the Windows Mixed Reality drivers
 
 ## Usage
-Inject WMRInterceptHost.dll into the WUDFHost process of the Mixed Reality driver (for instance with [Process Hacker](https://processhacker.sourceforge.io/)).
-Since there may be multiple WUDFHost processes, verify that the target process has its current directory inside System32\\DriverStore\\FileRepository\\hololenssensors.inf_amd64_\<hash\>.
+- Copy WMRInterceptHost.dll to a place the Local Services account can access (e.g. `C:\Windows\System32`) or set permissions manually.
 
-This will open a pipe at \\\\.\\pipe\\wmrcam, which local programs can connect to in order to retrieve camera images and controller tracking information. 
+- Inject WMRInterceptHost.dll into the WUDFHost process of the Mixed Reality driver (for instance with [Process Hacker](https://processhacker.sourceforge.io/)). Since there may be multiple WUDFHost processes, verify that the target process has its current directory inside `System32\DriverStore\FileRepository\hololenssensors.inf_amd64_<hash>`.
+
+This will open a pipe at `\\.\pipe\wmrcam`, which local programs can connect to in order to retrieve camera images and controller tracking information.
 
 In order to retrieve this information in other projects, include the WMRPipeClient library in your project and create a WMRInterceptPipeClient. A sample is included with the WMRViewer project.
 
