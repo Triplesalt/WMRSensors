@@ -280,10 +280,17 @@ static const BYTE IMUStreamActiveOffs_Mask[] = {
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00
 };
 //48 23 0D ?? ?? ?? ?? 4C 8B 05 ?? ?? ?? ?? 48 8B C1 48 8B 15 ?? ?? ?? ?? 48 03 C0
-static const BYTE SearchController_Pattern[] = {
+static const BYTE SearchController1809_Pattern[] = {
 	0x48, 0x23, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x4C, 0x8B, 0x05, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xC1, 0x48, 0x8B, 0x15, 0x00, 0x00, 0x00, 0x00, 0x48, 0x03, 0xC0
 };
-static const BYTE SearchController_Mask[] = {
+static const BYTE SearchController1809_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF
+};
+//4C 8B 15 ?? ?? ?? ?? 4C 8B 1D ?? ?? ?? ?? 4C 23 D0 4C 8B 05 ?? ?? ?? ?? 4D 03 D2
+static const BYTE SearchController1903_Pattern[] = {
+	0x4C, 0x8B, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4C, 0x8B, 0x1D, 0x00, 0x00, 0x00, 0x00, 0x4C, 0x23, 0xD0, 0x4C, 0x8B, 0x05, 0x00, 0x00, 0x00, 0x00, 0x4D, 0x03, 0xD2
+};
+static const BYTE SearchController1903_Mask[] = {
 	0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF
 };
 //48 89 5C 24 08 48 89 74 24 10 57 48 83 EC ??
@@ -302,6 +309,7 @@ static const BYTE CrystalKeyStopIMUStream_Mask[] = {
 };
 
 //MotionControllerSystem.dll
+//8B 4B ?? 8B 53 ?? 3B CA 75 ?? 48 8B 85
 static const BYTE DriftManagerStateOffs_Pattern[] = {
 	0x8B, 0x4B, 0x00, 0x8B, 0x53, 0x00, 0x3B, 0xCA, 0x75, 0x00, 0x48, 0x8B, 0x85
 };
@@ -309,6 +317,7 @@ static const BYTE DriftManagerStateOffs_Mask[] = {
 	0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF
 };
 
+//48 8D 15 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? 4C 8B C6 C5 F8 77 E8 ?? ?? ?? ??
 static const BYTE DriftManagerUpdateStateHook_Pattern[] = {
 	0x48, 0x8D, 0x15, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x4C, 0x8B, 0xC6, 0xC5, 0xF8, 0x77, 0xE8, 0x00, 0x00, 0x00, 0x00
 };
@@ -316,13 +325,24 @@ static const BYTE DriftManagerUpdateStateHook_Mask[] = {
 	0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00
 };
 
-static const BYTE DriftManagerOffs_Pattern[] = {
+//49 8D 96 ?? ?? ?? ?? 49 8D 8E ?? ?? ?? ?? 48 89 54 24 ?? 4C 89 5C 24
+static const BYTE DriftManagerOffs1809_Pattern[] = {
 	0x49, 0x8D, 0x96, 0x00, 0x00, 0x00, 0x00, 0x49, 0x8D, 0x8E, 0x00, 0x00, 0x00, 0x00, 0x48, 0x89, 0x54, 0x24, 0x00, 0x4C, 0x89, 0x5C, 0x24
 };
-static const BYTE DriftManagerOffs_Mask[] = {
+static const BYTE DriftManagerOffs1809_Mask[] = {
 	0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF
 };
+static const size_t DriftManagerOffs1809_offset = 10;
+//4C 8B CF 4C 8D 85 ?? ?? ?? ?? 48 8D 95 ?? ?? ?? ?? 49 8D 8E ?? ?? ?? ?? E8 ?? ?? ?? ??
+static const BYTE DriftManagerOffs1903_Pattern[] = {
+	0x4C, 0x8B, 0xCF, 0x4C, 0x8D, 0x85, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x95, 0x00, 0x00, 0x00, 0x00, 0x49, 0x8D, 0x8E, 0x00, 0x00, 0x00, 0x00, 0xE8, 0x00, 0x00, 0x00, 0x00
+};
+static const BYTE DriftManagerOffs1903_Mask[] = {
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00
+};
+static const size_t DriftManagerOffs1903_offset = 20;
 
+//48 8B 02 83 B8 ?? ?? ?? ?? 00 75 09 48 8B 88 ?? ?? ?? ?? EB 02 33 C9
 static const BYTE ControllerHandleOffs_Pattern[] = {
 	0x48, 0x8B, 0x02, 0x83, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x75, 0x09, 0x48, 0x8B, 0x88, 0x00, 0x00, 0x00, 0x00, 0xEB, 0x02, 0x33, 0xC9
 };
@@ -350,13 +370,19 @@ bool StartupStateTransitionHooks()
 	g_DriftManagerNewStateOffs = *(BYTE*)((UINT_PTR)pDriftManagerStateOffsResult + 2);
 	g_DriftManagerOldStateOffs = *(BYTE*)((UINT_PTR)pDriftManagerStateOffsResult + 5);
 
-	void *pDriftManagerOffsResult = FindPattern(pTextSection, textSectionLen, DriftManagerOffs_Pattern, DriftManagerOffs_Mask, sizeof(DriftManagerOffs_Pattern));
-	if (!pDriftManagerOffsResult)
+	if (void *pDriftManagerOffsResult = FindPattern(pTextSection, textSectionLen, DriftManagerOffs1809_Pattern, DriftManagerOffs1809_Mask, sizeof(DriftManagerOffs1809_Pattern)))
+	{
+		g_ControllerDriftManagerOffs = *(DWORD*)((UINT_PTR)pDriftManagerOffsResult + DriftManagerOffs1809_offset);
+	}
+	else if (void *pDriftManagerOffsResult = FindPattern(pTextSection, textSectionLen, DriftManagerOffs1903_Pattern, DriftManagerOffs1903_Mask, sizeof(DriftManagerOffs1903_Pattern)))
+	{
+		g_ControllerDriftManagerOffs = *(DWORD*)((UINT_PTR)pDriftManagerOffsResult + DriftManagerOffs1903_offset);
+	}
+	else
 	{
 		OnErrorLog("ERROR: Can't find the DriftManagerOffs pattern in MotionControllerSystem.dll!\r\n");
 		goto fail;
 	}
-	g_ControllerDriftManagerOffs = *(DWORD*)((UINT_PTR)pDriftManagerOffsResult + 10);
 
 	void *pControllerHandleOffsResult = FindPattern(pTextSection, textSectionLen, ControllerHandleOffs_Pattern, ControllerHandleOffs_Mask, sizeof(ControllerHandleOffs_Pattern));
 	if (!pControllerHandleOffsResult)
@@ -452,8 +478,9 @@ void WMRControllerInterceptHost::Startup()
 	InitializeCriticalSection(&g_ControllerIMUSection);
 	g_ControllerIMUSectionInitialized = true;
 
-	void *pSearchControllerResult = FindPattern(pTextSection, textSectionLen, SearchController_Pattern, SearchController_Mask, sizeof(SearchController_Pattern));
-	if (!pSearchControllerResult)
+	void *pSearchControllerResult;
+	if (!(pSearchControllerResult = FindPattern(pTextSection, textSectionLen, SearchController1809_Pattern, SearchController1809_Mask, sizeof(SearchController1809_Pattern)))
+		&& !(pSearchControllerResult = FindPattern(pTextSection, textSectionLen, SearchController1903_Pattern, SearchController1903_Mask, sizeof(SearchController1903_Pattern))))
 	{
 		OnErrorLog("WARNING: Unable to find the SearchController pattern in MotionControllerHid.dll!\r\n");
 	}
@@ -463,7 +490,6 @@ void WMRControllerInterceptHost::Startup()
 			IMUStreamCallbackOffs_Pattern, IMUStreamCallbackOffs_Mask, sizeof(IMUStreamCallbackOffs_Pattern));
 		void *pIMUStreamActiveOffsResult = FindPattern(CrystalKeyStartIMUStream, min(512, textSectionLen - ((UINT_PTR)CrystalKeyStartIMUStream - (UINT_PTR)pTextSection)),
 			IMUStreamActiveOffs_Pattern, IMUStreamActiveOffs_Mask, sizeof(IMUStreamActiveOffs_Pattern));
-		void *pSearchControllerResult = FindPattern(pTextSection, textSectionLen, SearchController_Pattern, SearchController_Mask, sizeof(SearchController_Pattern));
 		if (!pIMUStreamCallbackOffsResult)
 		{
 			OnErrorLog("WARNING: Unable to find the IMUStreamCallbackOffs pattern in MotionControllerHid.dll!\r\n");
@@ -471,10 +497,6 @@ void WMRControllerInterceptHost::Startup()
 		else if (!pIMUStreamCallbackOffsResult)
 		{
 			OnErrorLog("WARNING: Unable to find the IMUStreamActiveOffs pattern in MotionControllerHid.dll!\r\n");
-		}
-		else if (!pSearchControllerResult)
-		{
-			OnErrorLog("WARNING: Unable to find the SearchController pattern in MotionControllerHid.dll!\r\n");
 		}
 		else
 		{
